@@ -11,7 +11,7 @@ from IPython.display import Image, display
 from langchain_core.runnables.graph import MermaidDrawMethod
 
 
-os.environ['GOOGLE_API_KEY'] = "AIzaSyCOyas_ZEu8bsYKgbGsQM8LMr6G0VPHHD0"
+os.environ['GOOGLE_API_KEY'] = ""
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
