@@ -6,14 +6,17 @@ from pathlib import Path
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 import sys
 import os
+from dotenv import load_dotenv
 
 from IPython.display import Image, display
 from langchain_core.runnables.graph import MermaidDrawMethod
 
 
-os.environ['GOOGLE_API_KEY'] = ""
-
 ROOT = Path(__file__).resolve().parents[1]
+
+# Load environment variables from parent directory's .env file
+load_dotenv(ROOT / ".env")
+os.environ['GOOGLE_API_KEY'] = os.getenv('GOOGLE_API_KEY')
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

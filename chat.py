@@ -384,7 +384,8 @@ def generate_response(messages, use_rag=True):
             "messages": messages,
             "question": question,
             "use_rag": use_rag,
-            "interrupted": False
+            "interrupted": False,
+            "response": ""
         }
     )
 
