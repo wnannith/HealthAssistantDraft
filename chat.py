@@ -1,49 +1,45 @@
-import os
-import io
-import sys
-import json
+"""
+For LLM-related tasks
+"""
+# Core Libraries
+import os, io, sys, json, re
 from pathlib import Path
+from pydantic import BaseModel, Field
+from typing import Annotated, Literal, TypedDict
 
+# Core Langchain
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_classic.schema import Document
+
+# Gemini LLMs
+# from langchain.chat_models import init_chat_model
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+# OpenAI LLMs
+# from openai import OpenAI
+
+# RAG
+from langchain_chroma import Chroma
+from chromadb.config import Settings
+
+
+#########################   TOOLS   #########################
+
+
+# Initial things
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 ctx = Path(__file__).parent / "context.json"
 if ctx.exists():
     cfg = json.loads(ctx.read_text(encoding="utf-8"))
 else:
     cfg = {}
 
-# Core Langchain
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
-# Gemini LLMs
-from langchain.chat_models import init_chat_model
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
-# OpenAI LLMs
-from openai import OpenAI
-
-# RAG
-from langchain_chroma import Chroma
-from chromadb.config import Settings
-
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-
-
-# Load system prompt from context.json
-def load_defaults(path=None):
-    """Load the default system prompts from `defaultContext.json`. Returns a dict."""
-    try:
-        if path is None:
-            path = Path(__file__).parent / "defaultContext.json"
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError as e:
-        print(f"Error loading defaultContext.json: {e}")
-        return dict()
-
-
-def get_prompt(key, default=None, fmt_vars=None):
+# Get system propmts for LLM from the .json file
+def get_prompt(key, default="", fmt_vars=None):
     """
     Retrieve a prompt from the defaults using a dot-separated key path.
 
@@ -73,11 +69,40 @@ def get_prompt(key, default=None, fmt_vars=None):
     return node
 
 
+# Load system prompt from .json
+def load_defaults(path=None):
+    """Load the default system prompts from `defaultContext.json`. Returns a dict."""
+    try:
+        if path is None:
+            path = Path(__file__).parent / "defaultContext.json"
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError as e:
+        print(f"Error loading defaultContext.json: {e}")
+        return {}
+
+
+def load_llm():
+    """
+    Docstring for load_llm
+    
+    :return: Description
+    :rtype: Any
+    """
+    llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-lite",
+            temperature=1.0,  # Gemini 3.0+ defaults to 1.0
+            max_tokens=1200,
+            timeout=None,
+            max_retries=2,
+        )
+    return llm
+
+
 def load_chroma(chroma_name=''):
     """
     Docstring for load_chroma
     """
-    # LOAD THE VECTOR DATABASE AND PREPARE RETRIEVAL
     try:
         if not chroma_name:
             chroma_name = load_defaults().get("chromaName", "")
@@ -96,12 +121,158 @@ def load_chroma(chroma_name=''):
             ),
         )
         return vectorstore.as_retriever()
-
     except:
         return None
 
 
-def generate_raw(system_prompt, message_list, use_rag=True):
+def format_docs(docs):
+    """
+    Docstring for format_docs
+    
+    :param docs: Description
+    :return: Description
+    :rtype: Any
+    """
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
+def format_messages(messages):
+    """
+    Docstring for format_messages
+    
+    :param messages: Description
+    :return: Description
+    :rtype: Any
+    """
+    parsed_messages = ""
+    for msg in messages:
+        # Handle tuples (role, content), dicts {"role", "content"}, and BaseMessage objects
+        if isinstance(msg, tuple):
+            role, content = msg
+        elif isinstance(msg, dict):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+        else:
+            # BaseMessage objects have .type and .content attributes
+            role = msg.type if hasattr(msg, 'type') else 'user'
+            content = msg.content if hasattr(msg, 'content') else str(msg)
+
+        if not content:
+            continue
+        parsed_messages += f"{role}: {content.strip()}\n"
+    return parsed_messages.strip()
+
+
+#########################   RESPONSE   #########################
+
+
+class AgentState(TypedDict):
+    """
+    A dataclass to provide states for the agaent
+    
+    :var Scale: Description
+    """
+    user_id = int | None
+    messages: list
+    question: str
+    use_rag: bool
+
+    severity_rate: int
+    is_new_user: bool
+    response: str | None
+    interrupted: bool
+
+
+class SeverityRate(BaseModel):
+    """
+    Integer value to rate the severity of the statements from 0 to 5. Based on medical triage.
+    """
+    rate: str = Field(description="Severity rate of the statement from 0-5.")
+
+
+def rate_severity(state: AgentState):
+    """
+    Rate the severity using structural output for further decisions. Based of triage.
+    
+    :param state: Description
+    :type state: AgentState
+    :return: Description
+    :rtype: Any
+    """
+
+    system_prompt = """You are a decisive classifier that determines the scale of triage of a set of statements.
+    Only return the numeric value.
+
+    Scale:
+    0: No risks whatsoever, or without sufficient evidence.
+    1: Mild skin rash, seasonal allergies, dry cough, minor bruise, or slight sore throat.
+    2: Low-grade fever, persistent vomiting, sprained ankle, or a deep cut requiring a few stitches.
+    3: High fever (>39.5°C), moderate dehydration, minor bone fractures, or persistent abdominal pain.
+    4: Difficulty breathing (wheezing), sudden high-intensity pain, major bone fractures, or heavy bleeding.
+    5: Sharp chest pain (cardiac arrest), unconsciousness, severe head trauma, or anaphylaxis.
+    """
+
+    rate_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system",
+                system_prompt + "\n\n" +
+                "Statements:\n{input}"
+            )
+        ]
+    )
+
+    llm = load_llm()
+    structured_llm = llm.with_structured_output(SeverityRate)
+    rating_llm = rate_prompt | structured_llm
+
+    formatted_msgs = format_messages(state["messages"])
+    if not formatted_msgs.strip():
+        formatted_msgs = get_prompt("defaultMessage", "Hello")
+
+    response = rating_llm.invoke({"input": formatted_msgs})
+
+    match = re.match(r"[0-5]", response.rate)
+    state["severity_rate"] = int(match.group(0)) if match else 0
+    return state
+
+
+def severity_router(state: AgentState):
+    """
+    Docstring for severity_router
+    
+    :param state: Description
+    :type state: AgentState
+    """
+    rate = state["severity_rate"]
+    if rate >= 4:
+        return "interrupt"
+    return "continue"
+
+
+def severity_interrupt(state: AgentState):
+    """
+    Docstring for severity_interrupt
+    
+    :param state: Description
+    :type state: AgentState
+    """
+    state["interrupted"] = True
+    return state
+
+
+def is_new_user(state: AgentState):
+    """
+    Check if the user is a new user
+    
+    :param state: Description
+    :type state: AgentState
+    """
+    state["is_new_user"] = False
+    ### db stuff.....
+    return state
+
+
+def generate_raw(state: AgentState):
     """
     Generate a response either via RAG (retrieval-augmented generation) or
     directly from the LLM API.
@@ -111,87 +282,158 @@ def generate_raw(system_prompt, message_list, use_rag=True):
     :param use_rag: if True, attempt to use the Chroma retriever + RAG chain
     :return: response string
     """
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite",
-        temperature=1.0,  # Gemini 3.0+ defaults to 1.0
-        max_tokens=1200,
-        timeout=None,
-        max_retries=2,
-    )
 
-    # Extract the last user message as input
-    last_user_content = ""
-    for role, content in reversed(message_list):
-        if role == "user":
-            last_user_content = content
-            break
+    messages = state["messages"]
+    llm = load_llm()
+    system = get_prompt("prompts.systemPrompt")
+    use_rag = state["use_rag"]
 
-    retriever = None
     if use_rag:
         retriever = load_chroma()
+        if retriever is not None:
+            system += "\n\n" + "From the context provided below:\n\n{{context}}"
 
-    # If RAG requested and retriever available, use RAG chain
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system",
+                system + "\n\n" +
+                "Answer the user appropriately:\n\n{{input}}"
+            )
+        ]
+    )
+
+    formatted_input = format_messages(messages)
+    if not formatted_input:
+        formatted_input = get_prompt("defaultMessage", "Hello")
+
+    chain = prompt | llm
     if use_rag and retriever is not None:
-        # Build ChatPromptTemplate for RAG
-        prompt_template = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{context}\n\nQuestion: {input}"),
-        ])
-        question_answer_chain = create_stuff_documents_chain(llm, prompt_template)
-        rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+        def safe_retrieve(x):
+            # Guard against empty input to embeddings
+            if not x or not x.strip():
+                return ""
+            return format_docs(retriever.invoke(x))
 
-        # Invoke RAG chain with the content
-        response = rag_chain.invoke({"input": last_user_content})
-        return response.get("answer", response.text if hasattr(response, 'text') else str(response))
+        response = chain.invoke({"context": safe_retrieve, "input": formatted_input})
 
-    # Direct LLM call (non-RAG)
-    prompt_list = [("system", system_prompt)]
-    prompt_list.extend(message_list)
-    response = llm.invoke(prompt_list)
-    return response.content.strip() if hasattr(response, 'content') else str(response).strip()
+    else:
+        response = chain.invoke({"input": formatted_input})
+
+    state["response"] = response.text.strip()
+    return state
 
 
-def generate_response(message_list, use_rag=True):
+def set_graph_response():
     """
-    Generate a basic response.
+    Docstring for set_graph_response
+    """
 
-    :param message_list: Description
+    workflow = StateGraph(AgentState)
+
+    workflow.add_node("rate_severity", rate_severity)
+    workflow.add_node("severity_interrupt", severity_interrupt)
+    workflow.add_node("is_new_user", is_new_user)
+    workflow.add_node("generate_raw", generate_raw)
+
+    workflow.set_entry_point("rate_severity")
+    workflow.add_conditional_edges(
+        "rate_severity", 
+        severity_router,
+        {
+            "continue": "is_new_user",
+            "interrupt": "severity_interrupt"
+        }
+    )
+    workflow.add_edge("is_new_user", "generate_raw")
+    workflow.add_edge("generate_raw", END)
+    workflow.add_edge("severity_interrupt", END)
+
+    graph = workflow.compile()
+    return graph
+
+
+def generate_response(messages, use_rag=True):
+    """
+    Generate an AI response from a message list.
+    
+    :param messages: Description
     :param use_rag: Description
     """
-    system_prompt = get_prompt("prompts.systemPrompt", default="You are a helpful assistant.")
-    return generate_raw(system_prompt, message_list, use_rag=use_rag)
+
+    question = ""
+    for msg in reversed(messages):
+        # Handle both tuples and dicts
+        if isinstance(msg, tuple):
+            role, content = msg
+        elif isinstance(msg, dict):
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+        else:
+            continue
+
+        if role == "user":
+            question = content.strip()
+            if not question:
+                question = get_prompt("defaultMessage")
+            break
+
+    graph = set_graph_response()
+    result = graph.invoke(
+        input = {
+            "user_id": None,
+            "messages": messages,
+            "question": question,
+            "use_rag": use_rag,
+            "interrupted": False
+        }
+    )
+
+    warning = False
+    response = result["response"]
+    response += "\n\n-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง"
+
+    if response["interrupted"]:
+        return None, True
+
+    if response["severity_rate"] >= 2:
+        warning = True
+
+    return response, warning
+
+
+#########################   SUMMARY   #########################
+
+
+class HealthSummary(BaseModel):
+    """
+    Daily Summary for the user.
+    """
+    summary: None | str = Field(description=get_prompt(
+        "prompts.summaryPrompt",
+        default="Please produce a short summary.")
+    )
+    office_risk: None | str = Field(description=get_prompt(
+        "prompts.symptomPrompts.officeSyndrome.riskLevelPrompt",
+        default="Rate risk: Low/Medium/High")
+        )
+    office_summary: None | str = Field(description=get_prompt(
+        "prompts.symptomPrompts.officeSyndrome.officeSyndrome",
+        default="Provide a short office-syndrome summary.")
+    )
 
 
 def generate_summary(message_list, use_rag=True):
     """
     Generate a daily summary (Overview and Risk by symptoms).
     """
-    # Use specific keys from defaultContext.json
-    summary_prompt = get_prompt("prompts.summaryPrompt", default="Please produce a short summary.")
 
-    # Office syndrome prompts are nested under symptomPrompts.officeSyndrome
-    office_risk_prompt = get_prompt("prompts.symptomPrompts.officeSyndrome.riskLevelPrompt",
-                                   default="Rate risk: Low/Medium/High")
-    office_summary_prompt = get_prompt("prompts.symptomPrompts.officeSyndrome.officeSyndrome",
-                                       default="Provide a short office-syndrome summary.")
+    llm = load_llm()
 
-    # Call the same response generator (will use RAG if requested)
-    summary = generate_raw(summary_prompt, message_list, use_rag=use_rag)
-    office_risk = generate_raw(office_risk_prompt, message_list, use_rag=use_rag)
-    office_summary = generate_raw(office_summary_prompt, message_list, use_rag=use_rag)
+    structured_llm = llm.with_structured_output(HealthSummary)
+    # response = generate_raw('', message_list, use_rag=use_rag, llm=structured_llm)
+
+    summary = response.text["summary"]
+    office_risk = response.text["office_risk"]
+    office_summary = response.text["office_summary"]
 
     return summary, office_risk, office_summary
-
-
-# client = OpenAI(
-#     api_key=os.getenv("CHAT_API_KEY"),
-#     base_url="https://api.opentyphoon.ai/v1"
-# )
-
-# stream = client.chat.completions.create(
-#     model="typhoon-v2.5-30b-a3b-instruct",
-#     messages=[
-#         {"role": "user", "content": content}
-#     ],
-#     stream=True
-# )

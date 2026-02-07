@@ -1,11 +1,16 @@
+"""
+Docstring for app
+"""
+
 import os
+from datetime import timedelta
+from dotenv import load_dotenv
+
 import discord
 from discord import app_commands
 from discord.ext import commands
-from dotenv import load_dotenv
 
 from chat import generate_response, generate_summary
-from datetime import timedelta
 from server import server_on
 
 intents = discord.Intents.default()
@@ -15,21 +20,29 @@ bot = commands.Bot(command_prefix='!',
                    intents=intents)
 
 
-async def build_query_with_history(message, current_content, max_messages=25, time_threshold_seconds=600, lookback_minutes=None, author_only=None):
+async def build_query_with_history(
+        channel, message, content=None,
+        max_messages=25, time_threshold_seconds=600,
+        lookback_minutes=None, author_only=None, same_day=False
+        ):
+
     """
     Collect prior messages from the same channel and build a conversation-style list of messages.
     - Gathers up to `max_messages` messages before `message` (not including itself).
     - Stops collecting when a time gap between consecutive messages exceeds `time_threshold_seconds`.
+        If `same_day=True`, the function will instead collect messages from the same calendar day
+        (since UTC midnight) and will not stop early based on `time_threshold_seconds`.
     - Skips empty messages and other bots (except this bot).
     - Returns a list of tuples (role, content) in chronological order, where role is "user" or "assistant".
     """
-    channel = message.channel
-    history_msgs = []
+    messages = []
 
     last_ts = message.created_at
-    # If lookback_minutes provided, compute cutoff and iterate after that time
+    # Compute cutoff. `same_day` takes precedence over `lookback_minutes` when set.
     cutoff = None
-    if lookback_minutes is not None:
+    if same_day:
+        cutoff = message.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif lookback_minutes is not None:
         cutoff = message.created_at - timedelta(minutes=lookback_minutes)
 
     async for prev in channel.history(limit=200, before=message.created_at if cutoff is None else None, after=cutoff, oldest_first=False):
@@ -47,55 +60,69 @@ async def build_query_with_history(message, current_content, max_messages=25, ti
 
         gap = (last_ts - prev.created_at).total_seconds()
         # if there's a large gap and we've already collected some context, stop
-        if gap > time_threshold_seconds and len(history_msgs) > 0:
+        # When `same_day=True` we do not cut off based on gap size.
+        if not same_day and gap > time_threshold_seconds and len(messages) > 0:
             break
 
-        history_msgs.append(prev)
+        prev_role = "assistant" if prev.author == bot.user else "user"
+        messages.append({"role": prev_role, "content": prev.content.strip()})
+
         last_ts = prev.created_at
-        if len(history_msgs) >= max_messages:
+
+        if len(messages) >= max_messages:
             break
 
     # reverse to chronological order
-    history_msgs.reverse()
+    messages.reverse()
+    message_role = "assistant" if message.author == bot.user else "user"
+    if content is None:
+        content = message.content
+    messages.append({"role": message_role, "content": content.strip()})
 
-    message_list = []
-    for m in history_msgs:
-        role = "assistant" if m.author == bot.user else "user"
-        message_list.append((role, m.content.strip()))
-
-    # append current content
-    current_role = "assistant" if message.author == bot.user else "user"
-    message_list.append((current_role, current_content.strip()))
-
-    return message_list
+    return messages
 
 
 @bot.event
 async def on_message(message):
+    """
+    Docstring for on_message
+    
+    :param message: Description
+    """
     try:
-        if not message:
-            message = "สวัสดี"
-
         if message.author == bot.user:
             return
 
-        # Handle DMs without prefix requirement
-        if isinstance(message.channel, discord.DMChannel):
-            current_content = message.content.strip()
-            message_list = await build_query_with_history(message, current_content)
-            await message.channel.send(generate_response(message_list))
+        if not message.content.startswith('!health'):
+            if not isinstance(message.channel, discord.DMChannel):
+                return
 
-        # Handle server messages with !health prefix
-        elif message.content.startswith('!health'):
-            # await message.channel.send("Received a trigger")
-            current_content = message.content.replace("!health", "", 1).strip()
-            message_list = await build_query_with_history(message, current_content)
-            await message.channel.send(generate_response(message_list))
+        content = message.content.replace("!health", "", 1).strip()
+        messages = await build_query_with_history(message.channel, message, content)
+        response, warning = generate_response(messages)
+
+        if response is not None and warning:
+            severe_embed = discord.Embed(
+                title="ข้อควรระวัง",
+                description="อาการของคุณน่าเป็นห่วงอย่างมาก กรุณาติดต่อสายด่วน และเข้ารับการกำกับดูแลโดยเร็วที่สุด",
+                color=discord.Color.red()
+            )
+            await message.channel.send(embed=severe_embed)
+            return
+
+        if warning:
+            warning_embed = discord.Embed(
+                title="ข้อควรระวัง",
+                description="จากการประเมินอาการเบื้องต้นจากข้อความของคุณ อาการเหล่านี้ไม่ควรปล่อยปะละเลย กรุณาเข้ารับการวินิจฉัยกับสถานพยาบาลเพื่อรับคำแนะนำ",
+                color=discord.Color.yellow()
+            )
+            await message.channel.send(embed=warning_embed)
+            return
 
     except Exception as e:
         error_embed = discord.Embed(
             title="Error",
-            description=f"An error occurred while processing your request: {str(e)}",
+            description=f"An error occurred while processing your request:\n{str(e)}",
             color=discord.Color.red()
         )
         await message.channel.send(embed=error_embed)
@@ -103,17 +130,24 @@ async def on_message(message):
 
 @bot.tree.command(name="summary", description="Get your personalized health summary.")
 async def summary(interaction):
-    # Collect user's messages for the past 24 hours (customize lookback_minutes as needed)
-    lookback_minutes = 24 * 60
+    # Defer immediately in case summary generation takes >3s
+    try:
+        await interaction.response.defer(thinking=True)
+    except Exception:
+        # If defer fails (very rare), continue and attempt to follow up later
+        pass
+
+    # Collect user's messages for the same calendar day (UTC)
     channel = interaction.channel
-    cutoff = discord.utils.utcnow() - timedelta(minutes=lookback_minutes)
+    now = discord.utils.utcnow()
+    cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     msgs = []
     async for m in channel.history(limit=1000, after=cutoff, oldest_first=True):
         if m.author.id == interaction.user.id or (m.author == bot.user):
             role = "assistant" if m.author == bot.user else "user"
             if getattr(m, "content", None) and m.content.strip() != "":
-                msgs.append((role, m.content.strip()))
+                msgs.append({"role": role, "content": m.content.strip()})
 
     embed = discord.Embed(
             title="Summary",
@@ -137,9 +171,65 @@ async def summary(interaction):
     embed.add_field(name='', value=office_summary, inline=False)
     embed.set_footer(text="ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง")
 
-    embed.set_footer(text="ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง")
+    # Send as a followup because we deferred earlier
+    try:
+        await interaction.followup.send(embed=embed)
+    except discord.NotFound:
+        # Unknown interaction / original response deleted - log and skip
+        print("Warning: Unknown interaction when sending summary (NotFound).")
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="Error",
+            description=f"An error occurred while processing your request: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.channel.send(embed=error_embed)
 
-    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="ask", description="Ask the bot a question. (Alternative to `!health` prefix in server channels)")
+@app_commands.describe(question="The question you want to ask...")
+async def ask(interaction, question: str):
+    try:
+        await interaction.response.defer(thinking=True)
+    except Exception:
+        # If defer fails (very rare), continue and attempt to follow up later
+        pass
+    channel = interaction.channel
+    msgs = []
+    async for m in channel.history(limit=200, oldest_first=False):
+        if m.author.id == interaction.user.id or (m.author == bot.user):
+            role = "assistant" if m.author == bot.user else "user"
+            if getattr(m, "content", None) and m.content.strip() != "":
+                msgs.append({"role": role, "content": m.content.strip()})
+    msgs.reverse()
+    msgs.append({"role": "user", "content": question.strip()})
+    await interaction.followup.send(generate_response(msgs))
+
+
+@bot.tree.command(name="askraw", description="[Testing purposes only] Ask the bot a question without RAG.")
+@app_commands.describe(question="The question you want to ask...")
+async def askraw(interaction, question: str):
+    try:
+        await interaction.response.defer(thinking=True)
+    except Exception:
+        # If defer fails (very rare), continue and attempt to follow up later
+        pass
+
+    channel = interaction.channel
+    msgs = []
+    async for m in channel.history(limit=200, oldest_first=False):
+        if m.author.id == interaction.user.id or (m.author == bot.user):
+            role = "assistant" if m.author == bot.user else "user"
+            if getattr(m, "content", None) and m.content.strip() != "":
+                msgs.append({"role": role, "content": m.content.strip()})
+    msgs.reverse()
+    msgs.append({"role": "user", "content": question.strip()})
+    await interaction.followup.send(generate_response(msgs, use_rag=False))
+
+
+@bot.tree.command(name="reset-user", description="[DANGER] Remove your stored data.")
+async def reset_user(interaction):
+    pass
 
 
 @bot.event
@@ -153,6 +243,7 @@ def main():
     server_on()
     token = os.getenv("DISCORD_TOKEN")
     bot.run(token)
+
 
 if __name__ == "__main__":
     main()
