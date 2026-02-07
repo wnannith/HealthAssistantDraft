@@ -2,16 +2,21 @@
 For LLM-related tasks
 """
 # Core Libraries
-import os, io, sys, json, re
+import os
+import io
+import sys
+import json
+import re
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Annotated, Literal, TypedDict
 
 # Core Langchain
-from langchain_core.prompts import ChatPromptTemplate
-from langgraph.graph import StateGraph, END
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_classic.schema import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain.chat_models import init_chat_model
+from langgraph.graph import StateGraph, END
 
 # Gemini LLMs
 # from langchain.chat_models import init_chat_model
@@ -89,14 +94,22 @@ def load_llm():
     :return: Description
     :rtype: Any
     """
-    llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite",
-            temperature=1.0,  # Gemini 3.0+ defaults to 1.0
-            max_tokens=1200,
-            timeout=None,
-            max_retries=2,
-        )
-    return llm
+    google_llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash-lite",
+        temperature=1.0,  # Gemini 3.0+ defaults to 1.0
+        max_tokens=1200,
+        timeout=None,
+        max_retries=2,
+    )
+
+    typhoon_llm = init_chat_model(
+        model="typhoon-v2.5-30b-a3b-instruct",
+        model_provider="openai",
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url="https://api.opentyphoon.ai/v1"
+    )
+
+    return typhoon_llm
 
 
 def load_chroma(chroma_name=''):
@@ -146,10 +159,8 @@ def format_messages(messages):
     """
     parsed_messages = ""
     for msg in messages:
-        # Handle tuples (role, content), dicts {"role", "content"}, and BaseMessage objects
-        if isinstance(msg, tuple):
-            role, content = msg
-        elif isinstance(msg, dict):
+        # Handle dicts {"role", "content"} and BaseMessage objects
+        if isinstance(msg, dict):
             role = msg.get("role", "user")
             content = msg.get("content", "")
         else:
@@ -187,7 +198,7 @@ class SeverityRate(BaseModel):
     """
     Integer value to rate the severity of the statements from 0 to 5. Based on medical triage.
     """
-    rate: str = Field(description="Severity rate of the statement from 0-5.")
+    rate: int = Field(description="Severity rate of the statement from 0-5.")
 
 
 def rate_severity(state: AgentState):
@@ -214,25 +225,43 @@ def rate_severity(state: AgentState):
 
     rate_prompt = ChatPromptTemplate.from_messages(
         [
-            ("system",
-                system_prompt + "\n\n" +
-                "Statements:\n{input}"
-            )
+            ("system", system_prompt),
+            ("user", "Statements:\n{input}")
         ]
     )
 
     llm = load_llm()
-    structured_llm = llm.with_structured_output(SeverityRate)
+    structured_llm = llm.with_structured_output(SeverityRate(rate=0), method="json_mode")
     rating_llm = rate_prompt | structured_llm
 
     formatted_msgs = format_messages(state["messages"])
     if not formatted_msgs.strip():
         formatted_msgs = get_prompt("defaultMessage", "Hello")
 
+    # print(f"DEBUG: Input to LLM is: '{formatted_msgs}'") # If this prints '', that's your problem.
     response = rating_llm.invoke({"input": formatted_msgs})
 
-    match = re.match(r"[0-5]", response.rate)
-    state["severity_rate"] = int(match.group(0)) if match else 0
+    try:
+        # structured_llm returns the Pydantic object directly
+        response = rating_llm.invoke({"input": formatted_msgs})
+        
+        # If it's already the Pydantic model:
+        if isinstance(response, SeverityRate):
+            state["severity_rate"] = int(response.rate)
+        # If it somehow returned a dict instead:
+        elif isinstance(response, dict):
+            state["severity_rate"] = int(response.get("rate", 0))
+        else:
+            state["severity_rate"] = 0
+            
+    except Exception as e:
+        print(f"Parsing Error: {e}")
+        # Logic for a "Safe Fallback"
+        # If the LLM fails to categorize, we default to 0 to allow the flow to continue
+        state["severity_rate"] = 0
+
+    # match = re.match(r"[0-5]", response.rate)
+    # state["severity_rate"] = int(match.group(0)) if match else 0
     return state
 
 
@@ -288,17 +317,28 @@ def generate_raw(state: AgentState):
     system = get_prompt("prompts.systemPrompt")
     use_rag = state["use_rag"]
 
+
+    context = ""
     if use_rag:
         retriever = load_chroma()
-        if retriever is not None:
-            system += "\n\n" + "From the context provided below:\n\n{{context}}"
+        query = state.get("question", "").strip()
+        
+        # GUARD: Only invoke retriever if we actually have a query
+        if retriever is not None and query:
+            try:
+                docs = retriever.invoke(query)
+                context_data = format_docs(docs)
+                system += "\n\n" + f"From the context provided below:\n\n{context}"
+            except Exception as e:
+                print(f"RAG Error: {e}")
+                # Fallback: continue without context if retrieval fails
+        elif not query:
+            print("DEBUG: RAG enabled but question was empty. Skipping retrieval.")
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system",
-                system + "\n\n" +
-                "Answer the user appropriately:\n\n{{input}}"
-            )
+            ("system", system),
+            ("user", "Statements:\n{input}")
         ]
     )
 
@@ -308,14 +348,8 @@ def generate_raw(state: AgentState):
 
     chain = prompt | llm
     if use_rag and retriever is not None:
-        def safe_retrieve(x):
-            # Guard against empty input to embeddings
-            if not x or not x.strip():
-                return ""
-            return format_docs(retriever.invoke(x))
-
-        response = chain.invoke({"context": safe_retrieve, "input": formatted_input})
-
+        context_data = format_docs(retriever.invoke(state["question"]))
+        response = chain.invoke({"context": context_data, "input": formatted_input})
     else:
         response = chain.invoke({"input": formatted_input})
 
@@ -362,21 +396,23 @@ def generate_response(messages, use_rag=True):
 
     question = ""
     for msg in reversed(messages):
-        # Handle both tuples and dicts
-        if isinstance(msg, tuple):
-            role, content = msg
-        elif isinstance(msg, dict):
+        # Handle dicts and BaseMessage objects
+        if isinstance(msg, dict):
             role = msg.get("role", "")
             content = msg.get("content", "")
         else:
-            continue
-
-        if role == "user":
+            # BaseMessage objects have .type and .content attributes
+            role = msg.type if hasattr(msg, 'type') else ""
+            content = msg.content if hasattr(msg, 'content') else ""
+        
+        # print(role, content)
+        if role == "human":
             question = content.strip()
             if not question:
                 question = get_prompt("defaultMessage")
             break
 
+    # print(question)
     graph = set_graph_response()
     result = graph.invoke(
         input = {
@@ -393,10 +429,10 @@ def generate_response(messages, use_rag=True):
     response = result["response"]
     response += "\n\n-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง"
 
-    if response["interrupted"]:
+    if result["interrupted"]:
         return None, True
 
-    if response["severity_rate"] >= 2:
+    if result["severity_rate"] >= 2:
         warning = True
 
     return response, warning

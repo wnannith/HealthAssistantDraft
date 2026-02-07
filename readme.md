@@ -9,5 +9,7 @@
 
 ## แหล่งอ้างอิง
 
+[Langchain](https://github.com/harishneel1/langchain-course/tree/main/) ทุกอย่าง
+
 [RAG Agent](https://github.com/aliceheiman/YouTube/blob/main/nih-rag/) นำโมเดล RAG ในรูป chroma db ใช้ประกอบการ generate  
 ~~[SQL Agent](https://github.com/Mayurji/Explore-Libraries/blob/main/SQL-Agent/) เชื่อมต่อ Database เพื่อเก็บข้อมูลผู้ใช้~~

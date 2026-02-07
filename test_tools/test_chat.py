@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # Load environment variables from parent directory's .env file
 load_dotenv(ROOT / ".env")
 os.environ['GOOGLE_API_KEY'] = os.getenv('GOOGLE_API_KEY')
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY')
+
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -28,7 +30,7 @@ except Exception as e:
 
 
 def main():
-    print("chat module:", chat)
+    # print("chat module:", chat)
 
     msgs = [
         HumanMessage("Hello, my friend.")
@@ -46,15 +48,19 @@ def main():
     # except Exception as e:
     #     print("load_defaults failed:", e)
 
-    display(
-        Image(
-            chat.set_graph_response().get_graph().draw_mermaid_png(
-                draw_method=MermaidDrawMethod.API
-            )
-        )
-    )
+    # display(
+    #     Image(
+    #         chat.set_graph_response().get_graph().draw_mermaid_png(
+    #             draw_method=MermaidDrawMethod.API
+    #         )
+    #     )
+    # )
 
-    # chat.generate_response(messages=msgs, use_rag=False)
+    for status in [False, True]:
+        print(status)
+        response, _ = chat.generate_response(messages=msgs, use_rag=status)
+        print(response)
+        print()
 
 
 if __name__ == '__main__':
