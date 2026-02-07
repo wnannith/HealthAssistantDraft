@@ -1,14 +1,15 @@
 {
     "user": "",
+    "defaultMessage": "สวัสดี",
     "prompts": {
         "systemPrompt": "You are a health assistant.\nGive general health advice only.\nDo not diagnose diseases.\nRecommend seeing a doctor if symptoms are serious.",
         "summaryPrompt": "You are a health assistant.\nPlease produce a short daily health summary based on the conversation history.\nKeep it concise (1-2 sentences).",
         "symptomPrompts": {
             "officeSyndrome": {
-                "riskLevelPrompt": "ONLY RESPOND WITH THESE: Low/Medium/High\nYou are a health assistant.\nFrom the scale of Low/Medium/High, please rate the risk of Office Syndrome-related impacts based on the conversation history.",
+                "riskLevelPrompt": "[Low / Medium / High] Rate the risk of Office Syndrome-related symptoms based on the conversation history.",
                 "officeSyndrome": "You are a health assistant.\nPlease produce a short daily summary regarding the person's risk of Office Syndrome based on the conversation history."
             }
         }
     },
-    "chromaName": "nih-chroma.db"
+    "chromaName": "office-syndrome.db"
 }
