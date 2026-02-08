@@ -7,9 +7,10 @@
         "symptomPrompts": {
             "officeSyndrome": {
                 "riskLevelPrompt": "[Low / Medium / High] Rate the risk of Office Syndrome-related symptoms based on the conversation history.",
-                "officeSyndrome": "You are a health assistant.\nPlease produce a short daily summary regarding the person's risk of Office Syndrome based on the conversation history."
+                "riskSummaryPrompt": "You are a health assistant.\nPlease produce a short daily summary regarding the person's risk of Office Syndrome based on the conversation history."
             }
         }
     },
-    "chromaName": "office-syndrome.db"
+    "databaseName": "db/users.db",
+    "chromaName": "db/office-syndrome.db"
 }
