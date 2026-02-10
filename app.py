@@ -324,8 +324,6 @@ async def reset_user(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    conn = sqlite3.connect("users.db")
-    conn.execute("PRAGMA foreign_keys = ON") # Ensures child records behave correctly
     print(f'We have logged in as {bot.user}')
 
 

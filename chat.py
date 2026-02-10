@@ -94,7 +94,6 @@ class TopicChecklist(BaseModel):
     Checklists for a user's sentiment, used for deciding the topic.
     """
     has_info: bool = Field(description="Whether the sentiment contains their personal info.")
-    is_question: bool = Field(description="Whether the sentiment is a question.")
 
 
 class ProfileStructure(BaseModel):
@@ -260,6 +259,7 @@ def fetch_user_context(user_id: int):
     """Fetch profile and the most recent BMI record."""
     try:
         conn = sqlite3.connect(load_defaults().get("databaseName"))
+        conn.execute("PRAGMA foreign_keys = ON") # Ensures child records behave correctly
         # Use Row factory to access columns by name
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -530,10 +530,9 @@ def extract_topic(state: AgentState):
     structured_llm = llm.with_structured_output(TopicChecklist, method="json_mode")
 
     system_prompt = (
-        "You are a linguistic classifier. Analyze the user's message for two specific things:\n"
+        "You are a linguistic classifier. Analyze the user's message for provided specific thing(s):\n"
         "1. has_info: Does the user provide personal details (name, weight, job, etc.)?\n"
-        "2. is_question: Is the user asking a health-related question?\n\n"
-        "Return ONLY a JSON object: {{\"has_info\": boolean, \"is_question\": boolean}}"
+        "Return ONLY a JSON object: {{\"has_info\": boolean}}"
     )
 
     # We only look at the most recent message to save tokens
@@ -548,10 +547,8 @@ def extract_topic(state: AgentState):
             ("system", system_prompt),
             ("user", state["question"])
         ])
-        if response.has_info and response.is_question:
+        if response.has_info:
             state["topic"] = 'update_ask'
-        elif response.has_info:
-            state["topic"] = 'update'
         else:
             state["topic"] = 'ask'
 
