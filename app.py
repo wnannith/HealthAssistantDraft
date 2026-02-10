@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from chat import generate_response, generate_summary, save_extracted_profile, ProfileStructure
+from chat import get_prompt, generate_response, generate_summary, save_extracted_profile, ProfileStructure
 from server import server_on
 
 intents = discord.Intents.default()
@@ -56,8 +56,8 @@ class ResetConfirmView(discord.ui.View):
 
         try:
             # Perform the database deletion
-            import sqlite3
-            conn = sqlite3.connect("users.db")
+            conn = sqlite3.connect(get_prompt("databaseName"))
+            conn.execute("PRAGMA foreign_keys = ON")
             cursor = conn.cursor()
             
             # Delete from both tables (Foreign key handles records if configured, but manual is safer)
@@ -298,7 +298,7 @@ async def askraw(interaction, question: str):
     """
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
-    response_text, _ = generate_response(history, user_id=interaction.user.id, use_rag=False, topic='ask')
+    response_text, _ = generate_response(history, user_id=None, use_info=False, use_rag=False, topic='ask')
 
     await interaction.followup.send(response_text)
 

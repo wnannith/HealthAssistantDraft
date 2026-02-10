@@ -258,7 +258,7 @@ def format_messages(messages):
 def fetch_user_context(user_id: int):
     """Fetch profile and the most recent BMI record."""
     try:
-        conn = sqlite3.connect(load_defaults().get("databaseName"))
+        conn = sqlite3.connect(get_prompt("databaseName"))
         conn.execute("PRAGMA foreign_keys = ON") # Ensures child records behave correctly
         # Use Row factory to access columns by name
         conn.row_factory = sqlite3.Row
@@ -356,7 +356,8 @@ def save_extracted_profile(user_id, extracted_data: ProfileStructure):
     :param extracted_data: Description
     :type extracted_data: ProfileStructure
     """
-    conn = sqlite3.connect(load_defaults().get("databaseName"))
+    conn = sqlite3.connect(get_prompt("databaseName"))
+    conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
     
     # Update Users Table (only non-null fields)
