@@ -264,7 +264,7 @@ async def summary(interaction):
 async def update_user(interaction, question: str):
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
-    response_text, _ = generate_response(history, user_id=interaction.user.id)
+    response_text, _ = generate_response(history, user_id=interaction.user.id, topic='update')
 
     await interaction.followup.send(response_text)
 
