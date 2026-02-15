@@ -3,16 +3,19 @@ Docstring for app
 """
 
 import os
+from datetime import date
 import sqlite3
 from datetime import timedelta, timezone, datetime
 from dotenv import load_dotenv
+from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from chat import get_prompt, generate_response, generate_summary, save_extracted_profile, ProfileStructure
+from chat import get_prompt, generate_response, generate_summary, connect_db, save_extracted_profile, ProfileStructure
 from server import server_on
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -56,13 +59,15 @@ class ResetConfirmView(discord.ui.View):
 
         try:
             # Perform the database deletion
-            conn = sqlite3.connect(get_prompt("databaseName"))
+            conn = connect_db()
             conn.execute("PRAGMA foreign_keys = ON")
             cursor = conn.cursor()
             
             # Delete from both tables (Foreign key handles records if configured, but manual is safer)
-            cursor.execute("DELETE FROM UserBMIRecords WHERE userID = ?", (self.user_id,))
-            cursor.execute("DELETE FROM Users WHERE userID = ?", (self.user_id,))
+            cursor.execute("DELETE FROM UserSummaryRecords WHERE user_id = ?", (self.user_id,))
+            cursor.execute("DELETE FROM UserActivityRecords WHERE user_id = ?", (self.user_id,))
+            cursor.execute("DELETE FROM UserBMIRecords WHERE user_id = ?", (self.user_id,))
+            cursor.execute("DELETE FROM Users WHERE user_id = ?", (self.user_id,))
             
             conn.commit()
             conn.close()
@@ -76,6 +81,42 @@ class ResetConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="ยกเลิกการลบข้อมูล", view=None)
 
 
+def save_activity_to_db(user_id, date_str, steps, sleep_hours, calories_burned, avg_heart_rate, active_minutes):
+    conn = connect_db()
+    cursor = conn.cursor()
+
+    # We use COALESCE(steps, excluded.steps) to keep old data if the new input is NULL
+    query = """
+    INSERT INTO UserActivityRecords (user_id, date, steps, sleep_hours, calories_burned, avg_heart_rate, active_minutes)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, date) DO UPDATE SET
+        steps = COALESCE(excluded.steps, steps),
+        sleep_hours = COALESCE(excluded.sleep_hours, sleep_hours),
+        calories_burned = COALESCE(excluded.calories_burned, calories_burned),
+        avg_heart_rate = COALESCE(excluded.avg_heart_rate, avg_heart_rate),
+        active_minutes = COALESCE(excluded.active_minutes, active_minutes);
+    """
+    cursor.execute(query, (user_id, date_str, steps, sleep_hours, calories_burned, avg_heart_rate, active_minutes))
+    conn.commit()
+    conn.close()
+
+
+def save_bmi_to_db(user_id, date_str, weight, height):
+    conn = connect_db()
+    cursor = conn.cursor()
+    
+    query = """
+    INSERT INTO UserBMIRecords (user_id, date, weight, height)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id, date) DO UPDATE SET
+        weight = COALESCE(excluded.weight, weight),
+        height = COALESCE(excluded.height, height);
+    """
+    cursor.execute(query, (user_id, date_str, weight, height))
+    conn.commit()
+    conn.close()
+
+
 async def build_query_with_history(
     channel,
     user_id=None,
@@ -85,34 +126,53 @@ async def build_query_with_history(
     same_day=False
 ):
     """
-    Unified history builder for both on_message and slash commands.
+    ดึงประวัติการสนทนาโดยรวมเนื้อหาจาก Embeds และตัด Disclaimer ออก
     """
     messages = []
     now = discord.utils.utcnow()
     last_ts = now
     
-    # Pre-calculate cutoff for same_day
+    # ข้อความที่ต้องการตัดออกจากประวัติ (Disclaimer)
+    disclaimer = "\n\n-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง\n"
+    
     cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0) if same_day else None
 
-    # We fetch slightly more to account for filtering
     async for prev in channel.history(limit=100, before=now, after=cutoff, oldest_first=False):
-        if not prev.content or prev.content.strip() == "":
-            continue
-
-        # Filter: only user and this bot
+        # 1. Filter: กรองเฉพาะบอทตัวเองและ User ที่ระบุ
         if prev.author.bot and prev.author != bot.user:
             continue
         if user_id and not prev.author.bot and prev.author.id != user_id:
             continue
 
-        # Time gap check
+        # 2. รวมเนื้อหาจาก Text และ Embeds
+        full_content = prev.content if prev.content else ""
+        
+        if prev.author == bot.user and prev.embeds:
+            embed_texts = []
+            for embed in prev.embeds:
+                if embed.title: embed_texts.append(f"Title: {embed.title}")
+                if embed.description: embed_texts.append(embed.description)
+                for field in embed.fields:
+                    embed_texts.append(f"{field.name}: {field.value}")
+            
+            embed_combined = "\n".join(embed_texts)
+            full_content = f"{full_content}\n{embed_combined}".strip()
+
+        # 3. ล้าง Disclaimer ออกจากเนื้อหาเพื่อให้ LLM ได้รับข้อมูลที่สะอาด
+        full_content = full_content.replace(disclaimer, "").strip()
+
+        # ข้ามข้อความที่ว่างเปล่า
+        if not full_content:
+            continue
+
+        # 4. ตรวจสอบช่วงเวลา (Time Gap)
         if not same_day:
             gap = (last_ts - prev.created_at).total_seconds()
             if gap > time_threshold_seconds and len(messages) > 0:
                 break
 
         role = "assistant" if prev.author == bot.user else "user"
-        messages.append({"role": role, "content": prev.content.strip()})
+        messages.append({"role": role, "content": full_content})
         last_ts = prev.created_at
 
         if len(messages) >= max_messages:
@@ -120,11 +180,32 @@ async def build_query_with_history(
 
     messages.reverse()
     
-    # Append the current pending input if provided
     if current_content:
-        messages.append({"role": "user", "content": current_content.strip()})
+        # ตัด Disclaimer จากคำถามปัจจุบันด้วย (เผื่อกรณีมีการ Copy มาวาง)
+        clean_current = current_content.replace(disclaimer, "").strip()
+        messages.append({"role": "user", "content": clean_current})
         
     return messages
+
+
+async def send_long_message(ctx_or_interaction, text):
+    """Splits a string into chunks of 1900 characters and sends them."""
+    # Safety check for empty text
+    if not text:
+        return
+
+    # Split by chunks
+    chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
+    
+    for chunk in chunks:
+        # Check if it's an interaction (slash command) or a context/message
+        if isinstance(ctx_or_interaction, discord.Interaction):
+            if ctx_or_interaction.response.is_done():
+                await ctx_or_interaction.followup.send(chunk)
+            else:
+                await ctx_or_interaction.response.send_message(chunk)
+        else:
+            await ctx_or_interaction.send(chunk)
 
 
 @bot.event
@@ -154,7 +235,7 @@ async def on_message(message):
         response_text, state = generate_response(history, user_id=message.author.id)
 
         if response_text:
-            await message.channel.send(response_text)
+            await send_long_message(message.channel, response_text)
 
         if state.get("pending_extraction"):
             pending = state["pending_extraction"]
@@ -221,15 +302,23 @@ async def summary(interaction):
 
     # Generate summary (Overview, Risk)
     if history:
-        summary_response = generate_summary(history, use_rag=True)
-        overview = summary_response.get("overview")
-        office_risk = summary_response.get("office_risk")
-        office_summary = summary_response.get("office_summary")
+        summary_response, user_info = generate_summary(history, user_id=interaction.user.id, use_rag=True)
+        overview = summary_response.get("overview", '--')
+        office_risk = summary_response.get("office_risk", '--')
+        office_summary = summary_response.get("office_summary", '--')
+
+        name = '-- --'
+        height = '--'
+        weight = '--'
+        if user_info:
+            name = user_info.get("name", '-- --')
+            height = user_info.get("height", '--')
+            weight = user_info.get("weight", '--')
 
         embed.set_author(name=interaction.user.name, icon_url=str(interaction.user.avatar))
-        embed.add_field(name='Name', value='-- --', inline=False)
-        embed.add_field(name='Height', value='--', inline=True)
-        embed.add_field(name='Weight', value='--', inline=True)
+        embed.add_field(name='Name', value=name, inline=False)
+        embed.add_field(name='Height', value=f"{height} CM", inline=True)
+        embed.add_field(name='Weight', value=f"{weight} KG", inline=True)
         embed.add_field(name='Overview', value=overview, inline=False)
         embed.add_field(name='Office Syndrome', value='', inline=False)
         embed.add_field(name='Risk', value=office_risk, inline=False)
@@ -260,7 +349,7 @@ async def summary(interaction):
 
 
 @bot.tree.command(name="update-user", description="Update your personal profile with your words.")
-@app_commands.describe(question="The question you want to ask...")
+@app_commands.describe(question="Your info...")
 async def update_user(interaction, question: str):
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
@@ -301,6 +390,48 @@ async def askraw(interaction, question: str):
     response_text, _ = generate_response(history, user_id=None, use_info=False, use_rag=False, topic='ask')
 
     await interaction.followup.send(response_text)
+
+
+@bot.tree.command(name="log", description="Manually log your daily health stats.")
+@app_commands.describe(
+    steps="The steps taken (step)",
+    sleep_hours="Your sleep hours from last night (hr)",
+    calories_burned="Calories burned (kcal)",
+    avg_heart_rate="Your recorded average heart rate",
+    active_minutes="Your detected active minutes (min)", 
+
+    weight="Your recorded weight (kg)",
+    height="Your recorded height (cm)"
+    )
+async def log(
+    interaction: discord.Interaction,
+    steps: Optional[int] = None,
+    sleep_hours: Optional[float] = None,
+    calories_burned: Optional[float] = None,
+    avg_heart_rate: Optional[float] = None,
+    active_minutes: Optional[float] = None,
+
+    weight: Optional[int] = None,
+    height: Optional[int] = None
+):
+    user_id = interaction.user.id
+    today = date.today().isoformat()
+    
+    # Logic to save to multiple tables based on what was provided
+    try:
+        activity_info = [steps, sleep_hours, calories_burned, avg_heart_rate, active_minutes]
+        if any(activity_info):
+            save_activity_to_db(user_id, today, steps, sleep_hours, calories_burned, avg_heart_rate, active_minutes)
+            
+        bmi_info = [weight, height]
+        if any(bmi_info):
+            save_bmi_to_db(user_id, today, weight, height)
+            
+        await interaction.response.send_message(
+            f"✅ Data updated for {today}!", ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="reset-user", description="[DANGER] ลบข้อมูลส่วนตัวทั้งหมดออกจากระบบ")

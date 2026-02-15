@@ -5,7 +5,7 @@
 - Langchain + Langgraph  
 - RAG + ดึง database ผู้ใช้  
 - Summary รายวัน  
-- Update database ได้จาก input ภาษาธรรมชาติ (ยัง)  
+- Update database ได้จาก input ภาษาธรรมชาติ
 
 ## Feature (?)
 
@@ -27,8 +27,6 @@
 
 - **Database Schema (SQLite)** มี `db/users.db` เพื่อเก็บข้อมูลพื้นฐานผู้ใช้  
 อ้างอิงโครงสร้างจาก `db/sql/create_tables.sql` ได้  
-** มีแค่ตาราง แต่น่าจะยังเก็บไม่ได้  
-** ถ้าเก็บได้ ก็น่าจะพร้อมดึงมาใช้เจนคำตอบร่วมได้เลย  
 
 - **อื่น ๆ**  
     * ยังมี `db/nih-chroma/` อยู่  

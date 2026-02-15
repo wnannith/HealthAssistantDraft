@@ -1,20 +1,50 @@
 CREATE TABLE "Users" (
-	"userID" INTEGER NOT NULL UNIQUE,
+	"user_id" INTEGER NOT NULL UNIQUE,
 	"name" TEXT,
 	"dob" TEXT,
 	"occupation" TEXT,
 	"description" TEXT,
 	"chronic_disease" TEXT,
-	PRIMARY KEY("userID")
+	PRIMARY KEY("user_id")
 );
 
 
 CREATE TABLE "UserBMIRecords" (
-	"recordID" INTEGER NOT NULL UNIQUE,
-	"datetime" TEXT NOT NULL UNIQUE,
-	"userID" INTEGER NOT NULL,
+	"record_id" INTEGER NOT NULL UNIQUE,
+	"user_id" INTEGER NOT NULL,
+	"date" TEXT NOT NULL UNIQUE,
 	"weight" INTEGER,
 	"height" INTEGER,
-	PRIMARY KEY("recordID" AUTOINCREMENT),
-	FOREIGN KEY("userID") REFERENCES "Users"("userID")
+	PRIMARY KEY("record_id" AUTOINCREMENT),
+	FOREIGN KEY("user_id") REFERENCES "Users"("user_id")
+	UNIQUE("user_id", "date")
+);
+
+
+CREATE TABLE "UserSummaryRecords" (
+	"record_id"	INTEGER NOT NULL UNIQUE,
+	"user_id"	INTEGER NOT NULL,
+	"date"	INTEGER NOT NULL,
+	"overview" TEXT,
+	"office_risk" TEXT,
+	"office_summary" TEXT,
+	PRIMARY KEY("record_id" AUTOINCREMENT),
+	FOREIGN KEY("user_id") REFERENCES "Users"("user_id")
+	UNIQUE("user_id", "date")
+);
+
+
+CREATE TABLE "UserActivityRecords" (
+    "record_id" INTEGER NOT NULL UNIQUE,
+    "user_id"   INTEGER NOT NULL,
+    "date"      TEXT NOT NULL, -- Use ISO8601 string "YYYY-MM-DD"
+    "steps"     INTEGER DEFAULT 0,
+    "calories_burned" REAL,
+    "avg_heart_rate"  INTEGER,
+    "active_minutes"  INTEGER,
+    "sleep_hours"     REAL,
+    "source_device"   TEXT, -- e.g., "Apple Watch", "Fitbit"
+    PRIMARY KEY("record_id" AUTOINCREMENT),
+    FOREIGN KEY("user_id") REFERENCES "Users"("user_id"),
+	UNIQUE(user_id, date)
 );

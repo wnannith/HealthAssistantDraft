@@ -8,6 +8,7 @@ import io
 import sys
 import json
 import re
+import time
 from pathlib import Path
 from datetime import date
 from typing import Annotated, Literal, Optional, TypedDict
@@ -74,9 +75,12 @@ class AgentState(TypedDict):
     use_info: bool
     is_new_user: bool
     user_info: dict | None
+    user_context: str | None
     pending_extraction: dict | None  # Data waiting for user approval
 
     use_rag: bool
+    documents: str | None
+
     severity_rate: int
     response: str | None
     interrupted: bool
@@ -98,7 +102,7 @@ class TopicChecklist(BaseModel):
 
 class ProfileStructure(BaseModel):
     name: str
-    dob: Optional[str] = None
+    dob: Optional[int] = None
     occupation: Optional[str] = None
     description: Optional[str] = None
     chronic_disease: Optional[str] = None
@@ -164,10 +168,10 @@ def load_llm():
     """
     google_llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash-lite",
-        temperature=1.0,  # Gemini 3.0+ defaults to 1.0
-        max_tokens=1200,
+        temperature=1.0,
         timeout=None,
         max_retries=2,
+        max_tokens=4800
     )
 
     typhoon_llm = init_chat_model(
@@ -175,7 +179,7 @@ def load_llm():
         model_provider="openai",
         api_key=os.getenv("OPENTYPHOON_API_KEY"),
         base_url="https://api.opentyphoon.ai/v1",
-        max_tokens=1200
+        max_tokens=4800
     )
 
     if ALTER:
@@ -251,51 +255,66 @@ def format_messages(messages):
     return parsed_messages.strip()
 
 
-def fetch_user_context(user_id: int):
-    """Fetch profile and the most recent BMI record."""
+def connect_db():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(current_dir, get_prompt("databaseName"))
+    conn = sqlite3.connect(db_path)
+    return conn
+
+
+def fetch_user_info(user_id: int):
+    """Fetch profile, the most recent BMI, and today's activity stats."""
     try:
-        conn = sqlite3.connect(get_prompt("databaseName"))
-        conn.execute("PRAGMA foreign_keys = ON") # Ensures child records behave correctly
-        # Use Row factory to access columns by name
+        conn = connect_db()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        # Query joining Users and their latest BMI record
+        today = date.today().isoformat()
+
+        # We use subqueries to get the single latest entry for BMI
+        # and specifically today's data for Activity.
         query = """
-            SELECT u.name, u.dob, u.occupation, u.description, u.chronic_disease, 
-                   b.weight, b.height
+            SELECT 
+                u.*,
+                (SELECT weight FROM UserBMIRecords WHERE user_id = u.user_id ORDER BY date DESC LIMIT 1) as latest_weight,
+                (SELECT height FROM UserBMIRecords WHERE user_id = u.user_id ORDER BY date DESC LIMIT 1) as latest_height,
+                (SELECT steps FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as today_steps,
+                (SELECT sleep_hours FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as today_sleep
             FROM Users u
-            LEFT JOIN UserBMIRecords b ON u.userID = b.userID
-            WHERE u.userID = ?
-            ORDER BY b.datetime DESC
-            LIMIT 1
+            WHERE u.user_id = ?
         """
-        cursor.execute(query, (user_id,))
+        
+        cursor.execute(query, (today, today, user_id))
         row = cursor.fetchone()
         conn.close()
 
-        age = "None"
+        if not row:
+            return None
+
+        # Age calculation logic
+        age = "Unknown"
         if row["dob"]:
             birth_date = date.fromisoformat(row["dob"])
-            today = date.today()
-            age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+            today_dt = date.today()
+            age = today_dt.year - birth_date.year - ((today_dt.month, today_dt.day) < (birth_date.month, birth_date.day))
 
-        if row:
-            # Formatting the data into a readable block for the LLM
-            return {
-                "name": row["name"],
-                "age": age,
-                "occupation": row["occupation"],
-                "lifestyle": row["description"],
-                "chronic": row["chronic_disease"] or "None",
-                "weight": row["weight"],
-                "height": row["height"]
+        return {
+            "name": row["name"],
+            "age": age,
+            "occupation": row["occupation"],
+            "lifestyle": row["description"],
+            "chronic": row["chronic_disease"] or "None",
+            "weight": row["latest_weight"],
+            "height": row["latest_height"],
+            "today_stats": {
+                "steps": row["today_steps"] or 0,
+                "sleep": row["today_sleep"] or 0
             }
+        }
 
     except Exception as e:
         print(f"Database error: {e}")
-
-    return None
+        return None
 
 
 def get_bmi_analysis(weight, height):
@@ -319,28 +338,28 @@ def get_bmi_analysis(weight, height):
     return f"{bmi:.1f} ({category})"
 
 
-def format_user_persona(user_data: dict):
+def format_user_info(user_info: dict):
     """
-    Docstring for format_user_persona
+    Docstring for format_user_info
     
-    :param user_data: Description
-    :type user_data: dict
+    :param user_info: Description
+    :type user_info: dict
     :return: Description
     :rtype: Any
     """
 
-    if not user_data:
+    if not user_info:
         return ""
 
-    bmi_info = get_bmi_analysis(user_data.get('weight'), user_data.get('height'))
+    bmi_info = get_bmi_analysis(user_info.get('weight'), user_info.get('height'))
 
     return (
-        f"Name: {user_data['name']}\n"
-        f"Age: {user_data['age']}\n"
-        f"Occupation: {user_data['occupation']}\n"
+        f"Name: {user_info['name']}\n"
+        f"Age: {user_info['age']}\n"
+        f"Occupation: {user_info['occupation']}\n"
         f"BMI Status: {bmi_info}\n"
-        f"Known Chronic Diseases: {user_data['chronic']}\n"
-        f"Daily Lifestyle: {user_data['lifestyle']}\n"
+        f"Known Chronic Diseases: {user_info['chronic']}\n"
+        f"Daily Lifestyle: {user_info['lifestyle']}\n"
     )
 
 
@@ -352,38 +371,37 @@ def save_extracted_profile(user_id, extracted_data: ProfileStructure):
     :param extracted_data: Description
     :type extracted_data: ProfileStructure
     """
-    conn = sqlite3.connect(get_prompt("databaseName"))
+    conn = connect_db()
     conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
-    
+
     # Update Users Table (only non-null fields)
     update_fields = []
     params = []
-    
+
     for field, value in extracted_data.model_dump().items():
         if value is not None and field not in ["weight", "height"]:
             update_fields.append(f"{field} = ?")
             params.append(value)
-            
+
     if update_fields:
         params.append(user_id)
-        cursor.execute(f"UPDATE Users SET {', '.join(update_fields)} WHERE userID = ?", params)
+        cursor.execute(f"UPDATE Users SET {', '.join(update_fields)} WHERE user_id = ?", params)
 
     # Insert BMI Record if weight/height are found
     if extracted_data.weight or extracted_data.height:
         # Get existing values as fallback if only one is provided
-        cursor.execute("SELECT weight, height FROM UserBMIRecords WHERE userID = ? ORDER BY datetime DESC LIMIT 1", (user_id,))
+        cursor.execute("SELECT weight, height FROM UserBMIRecords WHERE user_id = ? ORDER BY datetime DESC LIMIT 1", (user_id,))
         existing = cursor.fetchone()
-        
+
         w = extracted_data.weight or (existing[0] if existing else None)
         h = extracted_data.height or (existing[1] if existing else None)
-        
-        import time
+
         cursor.execute(
-            "INSERT INTO UserBMIRecords (userID, datetime, weight, height) VALUES (?, ?, ?, ?)",
+            "INSERT INTO UserBMIRecords (user_id, datetime, weight, height) VALUES (?, ?, ?, ?)",
             (user_id, int(time.time()), w, h)
         )
-    
+
     conn.commit()
     conn.close()
 
@@ -397,6 +415,23 @@ def load_user_info(state: AgentState):
     """
     Loads user context and initializes records for new users.
     """
+    # RAG
+    retriever = None
+    if state.get("use_rag"):
+        retriever = load_chroma()
+        query = format_messages(state.get("messages"))
+
+        # GUARD: Only invoke retriever if we actually have a query
+        if retriever is not None and query:
+            try:
+                docs = retriever.invoke(query)
+                state["documents"] = format_docs(docs)
+            except Exception as e:
+                print(f"RAG Error: {e}")
+                # Fallback: continue without context if retrieval fails
+        elif not query:
+            print("DEBUG: RAG enabled but question was empty. Skipping retrieval.")
+
     if not state.get("use_info"):
         return state
 
@@ -405,16 +440,16 @@ def load_user_info(state: AgentState):
         return state
 
     # 1. Attempt to fetch existing data
-    user_data = fetch_user_context(user_id)
+    user_info = fetch_user_info(user_id)
 
-    if user_data is None:
+    if not user_info:
         # 2. This is a new user - Create a blank record in SQLite
         try:
-            conn = sqlite3.connect(get_prompt("databaseName"))
+            conn = connect_db()
             cursor = conn.cursor()
             # We insert with just the ID; other fields remain NULL until extracted
             cursor.execute(
-                'INSERT OR IGNORE INTO "Users" (userID) VALUES (?)', 
+                'INSERT OR IGNORE INTO "Users" (user_id) VALUES (?)', 
                 (user_id,)
             )
             conn.commit()
@@ -428,7 +463,8 @@ def load_user_info(state: AgentState):
     else:
         # 3. Existing user found
         state["is_new_user"] = False
-        state["user_info"] = user_data
+        state["user_info"] = user_info
+        state["user_context"] = format_user_info(user_info)
 
     return state
 
@@ -458,14 +494,9 @@ def rate_severity(state: AgentState):
     5: Sharp chest pain (cardiac arrest), unconsciousness, severe head trauma, or anaphylaxis.
     """
 
-    user_info = state.get("user_info")
-    persona_context = ""
-
-    if user_info:
-        persona_context = format_user_persona(state.get("user_info"))
-    # Inject into the system prompt
-    if persona_context:
-        system_prompt += f"\n\nAbout User:\n{persona_context}"
+    user_context = state.get("user_context")
+    if user_context:
+        system_prompt += f"\n\nAbout User:\n{user_context}"
 
     rate_prompt = ChatPromptTemplate.from_messages(
         [
@@ -485,9 +516,11 @@ def rate_severity(state: AgentState):
         # match = re.match(r"[0-5]", response.rate)
         # state["severity_rate"] = int(match.group(0)) if match else 0
     except Exception as e:
-        print(f"Severity Logic Failed to parse JSON. Raw output was likely chat text. Defaulting to 0.")
+        print("Error", str(e))
+        print("Severity Logic Failed to parse JSON. Defaulting to 0.")
         # If it failed, it's usually because the bot was being too 'chatty' (Severity 0)
         state["severity_rate"] = 0
+
     return state
 
 
@@ -574,7 +607,7 @@ def extract_profile(state: AgentState):
     """
     Extracts structured user data from a list of messages.
     """
-    messages = state.get("messages")
+    messages = format_messages(state.get("messages"))
     llm = load_llm()
     # Use json_mode for better reliability in Thai/English mixed contexts
     structured_llm = llm.with_structured_output(ProfileStructure, method="json_mode")
@@ -589,7 +622,8 @@ def extract_profile(state: AgentState):
     - Example: พ.ศ. 2539 becomes 1996.
     3. Occupation: Translate Thai occupations to English (e.g., 'พนักงานออฟฟิศ' -> 'Office Worker').
     4. Current Year: 2026.
-    5. If info is missing, return null. Do not hallucinate.
+    5. Return your last answer in the JSON form.
+    6. If info is missing, return null. Do not hallucinate.
     """
 
     prompt = ChatPromptTemplate.from_messages([
@@ -598,8 +632,7 @@ def extract_profile(state: AgentState):
     ])
 
     chain = prompt | structured_llm
-    formatted_history = format_messages(messages)
-    extracted = chain.invoke({"input": formatted_history})
+    extracted = chain.invoke({"input": messages})
 
     state["pending_extraction"] = extracted.model_dump(exclude_none=True)
     return state
@@ -619,8 +652,7 @@ def after_extract_router(state: AgentState):
 
 def generate_raw(state: AgentState):
     """
-    Generate a response either via RAG (retrieval-augmented generation) or
-    directly from the LLM API.
+    Generate a response either from the LLM API.
 
     :param system_prompt: the system prompt string
     :param message_list: list of tuples (role, content) where role is "user" or "assistant"
@@ -632,12 +664,9 @@ def generate_raw(state: AgentState):
     llm = load_llm()
     system_prompt = get_prompt("prompts.systemPrompt")
 
-    user_info = state.get("user_info")
-    persona_context = ""
-
-    if user_info:
-        persona_context = format_user_persona(state.get("user_info"))
-        system_prompt += f"\n\nYou are assisting the following user:\n{persona_context}"
+    user_context = state.get("user_context")
+    if user_context and state.get("use_info"):
+        system_prompt += f"\n\nYou are assisting the following user:\n{user_context}"
     elif state.get("is_new_user"):
         system_prompt += (
             "\n\nIMPORTANT: You are meeting this user for the first time. "
@@ -645,23 +674,9 @@ def generate_raw(state: AgentState):
             "and what they do for a living so you can give better health advice."
         )
 
-    retriever = None
-    context_data = ""
-    if state.get("use_rag"):
-        retriever = load_chroma()
-        query = state.get("question", "").strip()
-
-        # GUARD: Only invoke retriever if we actually have a query
-        if retriever is not None and query:
-            try:
-                docs = retriever.invoke(query)
-                context_data = format_docs(docs)
-                system_prompt += "\n\n" + f"From the context provided below:\n\n{context_data}"
-            except Exception as e:
-                print(f"RAG Error: {e}")
-                # Fallback: continue without context if retrieval fails
-        elif not query:
-            print("DEBUG: RAG enabled but question was empty. Skipping retrieval.")
+    documents = state.get("documents")
+    if documents:
+        system_prompt += "\n\n" + f"Use the context provided below:\n\n{documents}"
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -671,16 +686,11 @@ def generate_raw(state: AgentState):
     )
 
     formatted_input = format_messages(messages)
-    if not formatted_input or not formatted_input.strip():
+    if not formatted_input.strip():
         formatted_input = "Hello"
 
     chain = prompt | llm
-    if retriever is not None:
-        context_data = format_docs(retriever.invoke(state["question"]))
-        response = chain.invoke({"context": context_data, "input": formatted_input})
-    else:
-        response = chain.invoke({"input": formatted_input})
-
+    response = chain.invoke({"input": formatted_input})
     state["response"] = response.content.strip() if hasattr(response, 'content') else str(response)
     return state
 
@@ -789,7 +799,7 @@ def generate_response(
     )
 
     response = result["response"]
-    response += "\n\n-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง"
+    response += "\n\n-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง\n"
 
     return response, result
 
@@ -797,6 +807,38 @@ def generate_response(
 
 
 #########################   SUMMARY   #########################
+
+
+def save_summary_to_db(user_id, summary_dict):
+    """Saves the LLM-generated health summary to the database."""
+    conn = connect_db()
+    conn.execute("PRAGMA foreign_keys = ON")
+    cursor = conn.cursor()
+    
+    today = date.today().isoformat()
+    
+    query = """
+    INSERT INTO UserSummaryRecords (user_id, date, overview, office_risk, office_summary)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, date) DO UPDATE SET
+        overview = excluded.overview,
+        office_risk = excluded.office_risk,
+        office_summary = excluded.office_summary;
+    """
+    
+    try:
+        cursor.execute(query, (
+            user_id, 
+            today, 
+            summary_dict.get("overview"), 
+            summary_dict.get("office_risk"), 
+            summary_dict.get("office_summary")
+        ))
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"Error saving summary: {e}")
+    finally:
+        conn.close()
 
 
 class HealthSummary(BaseModel):
@@ -846,10 +888,10 @@ def generate_summary(messages, user_id=None, use_rag=True):
 
     user_info = {}
     if user_id:
-        user_info = fetch_user_context(user_id)
+        user_info = fetch_user_info(user_id)
     if user_info:
-        persona_context = format_user_persona(user_info)
-        system_prompt += f"\n\nAbout User:\n{persona_context}"
+        user_context = format_user_info(user_info)
+        system_prompt += f"\n\nAbout User:\n{user_context}"
 
     formatted_msg = format_messages(messages)
     context_data = ""
@@ -876,7 +918,6 @@ def generate_summary(messages, user_id=None, use_rag=True):
     chain = prompt | structured_llm
 
     # 4. Invoke and Handle Potential Failures
-
     try:
         # Standard structured call
         summary_result = chain.invoke({
@@ -884,16 +925,17 @@ def generate_summary(messages, user_id=None, use_rag=True):
             "input": formatted_msg
         })
 
-        # If returns the Pydantic object
-        if isinstance(summary_result, HealthSummary):
-            return summary_result.model_dump()
-        return summary_result # If it's already a dict
-  
+        final_dict = summary_result.model_dump() if hasattr(summary_result, 'model_dump') else summary_result
+        if user_id:
+            save_summary_to_db(user_id, final_dict)
+
+        return final_dict, user_info
+
     except Exception as e:
         print(f"Summary Generation Error: {e}")
         # Return a clean fallback dict that matches the HealthSummary structure
         return {
             "overview": "ขออภัย ไม่สามารถสรุปข้อมูลได้ในขณะนี้",
-            "office_risk": "Unknown",
-            "office_summary": "Unknown"
-        }
+            "office_risk": "--",
+            "office_summary": "--"
+        }, user_info
