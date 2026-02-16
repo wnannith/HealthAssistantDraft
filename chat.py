@@ -67,23 +67,24 @@ class AgentState(TypedDict):
     
     :var Scale: Description
     """
-    user_id: int | None
+    user_id: int | None = None
     messages: list
     question: str
-    topic: Literal["ask", "update", "update_ask"] | None
+    topic: Literal["ask", "update", "update_ask"] | None = None
 
     use_info: bool
-    is_new_user: bool
-    user_info: dict | None
-    user_context: str | None
-    pending_extraction: dict | None  # Data waiting for user approval
+    is_new_user: bool = False
+    user_info: dict | None = None
+    user_context: str | None = None
+    pending_extraction: dict | None = None  # Data waiting for user approval
 
     use_rag: bool
     documents: str | None
 
-    severity_rate: int
-    response: str | None
-    interrupted: bool
+    invoke_qa: dict | None = {}
+    severity_rate: int = 0
+    response: str | None = ""
+    interrupted: bool = False
 
 
 class SeverityRate(BaseModel):
@@ -101,13 +102,23 @@ class TopicChecklist(BaseModel):
 
 
 class ProfileStructure(BaseModel):
-    name: str
-    dob: Optional[int] = None
+    # User Table
+    name: Optional[str] = None
+    dob: Optional[str] = None
     occupation: Optional[str] = None
     description: Optional[str] = None
     chronic_disease: Optional[str] = None
-    weight: Optional[float] = None
-    height: Optional[float] = None
+    
+    # BMI Table
+    weight: Optional[int] = None
+    height: Optional[int] = None
+    
+    # Activity Table
+    steps: Optional[int] = None
+    sleep_hours: Optional[float] = None
+    calories_burned: Optional[float] = None
+    avg_heart_rate: Optional[float] = None
+    active_minutes: Optional[float] = None
 
 
 
@@ -263,7 +274,7 @@ def connect_db():
 
 
 def fetch_user_info(user_id: int):
-    """Fetch profile, the most recent BMI, and today's activity stats."""
+    """Fetch profile, latest BMI, today's activity, and latest summary."""
     try:
         conn = connect_db()
         conn.row_factory = sqlite3.Row
@@ -271,49 +282,67 @@ def fetch_user_info(user_id: int):
 
         today = date.today().isoformat()
 
-        # We use subqueries to get the single latest entry for BMI
-        # and specifically today's data for Activity.
         query = """
             SELECT 
                 u.*,
                 (SELECT weight FROM UserBMIRecords WHERE user_id = u.user_id ORDER BY date DESC LIMIT 1) as latest_weight,
                 (SELECT height FROM UserBMIRecords WHERE user_id = u.user_id ORDER BY date DESC LIMIT 1) as latest_height,
-                (SELECT steps FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as today_steps,
-                (SELECT sleep_hours FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as today_sleep
+                
+                -- Activity Data for Today
+                (SELECT steps FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as t_steps,
+                (SELECT sleep_hours FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as t_sleep,
+                (SELECT calories_burned FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as t_cal,
+                (SELECT avg_heart_rate FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as t_hr,
+                (SELECT active_minutes FROM UserActivityRecords WHERE user_id = u.user_id AND date = ?) as t_min,
+                
+                -- Latest Summary Data
+                (SELECT overview FROM UserSummaryRecords WHERE user_id = u.user_id ORDER BY date DESC LIMIT 1) as s_overview,
+                (SELECT office_risk FROM UserSummaryRecords WHERE user_id = u.user_id ORDER BY date DESC LIMIT 1) as s_risk,
+                (SELECT office_summary FROM UserSummaryRecords WHERE user_id = u.user_id ORDER BY date DESC LIMIT 1) as s_office
             FROM Users u
             WHERE u.user_id = ?
         """
         
-        cursor.execute(query, (today, today, user_id))
+        cursor.execute(query, (today, today, today, today, today, user_id))
         row = cursor.fetchone()
         conn.close()
 
         if not row:
             return None
 
-        # Age calculation logic
+        # Age calculation
         age = "Unknown"
         if row["dob"]:
-            birth_date = date.fromisoformat(row["dob"])
-            today_dt = date.today()
-            age = today_dt.year - birth_date.year - ((today_dt.month, today_dt.day) < (birth_date.month, birth_date.day))
+            try:
+                birth_date = date.fromisoformat(row["dob"])
+                today_dt = date.today()
+                age = today_dt.year - birth_date.year - ((today_dt.month, today_dt.day) < (birth_date.month, birth_date.day))
+            except: pass
 
         return {
-            "name": row["name"],
+            "name": row["name"] or "Unknown",
             "age": age,
-            "occupation": row["occupation"],
-            "lifestyle": row["description"],
+            "occupation": row["occupation"] or "None",
+            "lifestyle": row["description"] or "None",
             "chronic": row["chronic_disease"] or "None",
             "weight": row["latest_weight"],
             "height": row["latest_height"],
-            "today_stats": {
-                "steps": row["today_steps"] or 0,
-                "sleep": row["today_sleep"] or 0
+            "activity": {
+                "steps": row["t_steps"] or 0,
+                "sleep_hours": row["t_sleep"] or 0,
+                "calories_burned": row["t_cal"] or 0,
+                "avg_heart_rate": row["t_hr"] or 0,
+                "active_minutes": row["t_min"] or 0
+            },
+            "summary": {
+                "overview": row["s_overview"] or "No previous summary",
+                "office_risk": row["s_risk"] or "Unknown",
+                "office_summary": row["s_office"] or "None"
             }
         }
 
     except Exception as e:
-        print(f"Database error: {e}")
+        print(f"Database error in fetch_user_info: {e}")
         return None
 
 
@@ -339,28 +368,53 @@ def get_bmi_analysis(weight, height):
 
 
 def format_user_info(user_info: dict):
-    """
-    Docstring for format_user_info
-    
-    :param user_info: Description
-    :type user_info: dict
-    :return: Description
-    :rtype: Any
-    """
-
     if not user_info:
         return ""
 
+    sections = []
+    
+    # --- 1. User Profile ---
+    profile = []
+    if user_info.get('name'): profile.append(f"Name: {user_info['name']}")
+    if user_info.get('age') and user_info['age'] != "Unknown": profile.append(f"Age: {user_info['age']}")
+    if user_info.get('occupation'): profile.append(f"Occupation: {user_info['occupation']}")
+    
     bmi_info = get_bmi_analysis(user_info.get('weight'), user_info.get('height'))
+    if bmi_info != "Unknown": profile.append(f"BMI Status: {bmi_info}")
+    
+    if user_info.get('chronic') and user_info['chronic'] != "None": 
+        profile.append(f"Chronic Diseases: {user_info['chronic']}")
+    if user_info.get('lifestyle') and user_info['lifestyle'] != "None": 
+        profile.append(f"Lifestyle: {user_info['lifestyle']}")
+    
+    if profile:
+        sections.append("### User Profile\n" + "\n".join(profile))
 
-    return (
-        f"Name: {user_info['name']}\n"
-        f"Age: {user_info['age']}\n"
-        f"Occupation: {user_info['occupation']}\n"
-        f"BMI Status: {bmi_info}\n"
-        f"Known Chronic Diseases: {user_info['chronic']}\n"
-        f"Daily Lifestyle: {user_info['lifestyle']}\n"
-    )
+    # --- 2. Today's Activity ---
+    act = user_info.get('activity', {})
+    activity = []
+    # กรองเฉพาะค่าที่มีตัวเลขมากกว่า 0
+    if act.get('steps'): activity.append(f"- Steps: {act['steps']}")
+    if act.get('sleep_hours'): activity.append(f"- Sleep: {act['sleep_hours']} hours")
+    if act.get('calories_burned'): activity.append(f"- Calories: {act['calories_burned']} kcal")
+    if act.get('avg_heart_rate'): activity.append(f"- Heart Rate: {act['avg_heart_rate']} bpm")
+    if act.get('active_minutes'): activity.append(f"- Active Mins: {act['active_minutes']} mins")
+    
+    if activity:
+        sections.append("### Today's Activity\n" + "\n".join(activity))
+
+    # --- 3. Previous Summary ---
+    sum_data = user_info.get('summary', {})
+    summary = []
+    if sum_data.get('office_risk') and sum_data['office_risk'] != "Unknown":
+        summary.append(f"- Risk: {sum_data['office_risk']}")
+    if sum_data.get('overview') and "No previous" not in sum_data['overview']:
+        summary.append(f"- Last Overview: {sum_data['overview']}")
+        
+    if summary:
+        sections.append("### Previous Health Summary\n" + "\n".join(summary))
+
+    return "\n\n".join(sections)
 
 
 def save_extracted_profile(user_id, extracted_data: ProfileStructure):
@@ -374,36 +428,72 @@ def save_extracted_profile(user_id, extracted_data: ProfileStructure):
     conn = connect_db()
     conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
+    today = date.today().isoformat()
+    data_dict = extracted_data.model_dump(exclude_none=True)
 
-    # Update Users Table (only non-null fields)
-    update_fields = []
-    params = []
+    try:
+        # 1. Update Users Table
+        user_fields = ["name", "dob", "occupation", "description", "chronic_disease"]
+        update_parts = []
+        user_params = []
+        for field in user_fields:
+            if field in data_dict:
+                update_parts.append(f"{field} = ?")
+                user_params.append(data_dict[field])
+        
+        if update_parts:
+            user_params.append(user_id)
+            cursor.execute(f"UPDATE Users SET {', '.join(update_parts)} WHERE user_id = ?", user_params)
 
-    for field, value in extracted_data.model_dump().items():
-        if value is not None and field not in ["weight", "height"]:
-            update_fields.append(f"{field} = ?")
-            params.append(value)
+        # 2. Upsert BMI Records (Weight/Height)
+        if "weight" in data_dict or "height" in data_dict:
+            cursor.execute("""
+                INSERT INTO UserBMIRecords (user_id, date, weight, height)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, date) DO UPDATE SET
+                    weight = COALESCE(excluded.weight, weight),
+                    height = COALESCE(excluded.height, height)
+            """, (user_id, today, data_dict.get("weight"), data_dict.get("height")))
 
-    if update_fields:
-        params.append(user_id)
-        cursor.execute(f"UPDATE Users SET {', '.join(update_fields)} WHERE user_id = ?", params)
+        # 3. Upsert Activity Records
+        activity_fields = ["steps", "sleep_hours", "calories_burned", "avg_heart_rate", "active_minutes"]
+        if any(field in data_dict for field in activity_fields):
+            cursor.execute("""
+                INSERT INTO UserActivityRecords (user_id, date, steps, sleep_hours, calories_burned, avg_heart_rate, active_minutes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, date) DO UPDATE SET
+                    steps = COALESCE(excluded.steps, steps),
+                    sleep_hours = COALESCE(excluded.sleep_hours, sleep_hours),
+                    calories_burned = COALESCE(excluded.calories_burned, calories_burned),
+                    avg_heart_rate = COALESCE(excluded.avg_heart_rate, avg_heart_rate),
+                    active_minutes = COALESCE(excluded.active_minutes, active_minutes)
+            """, (
+                user_id, today, 
+                data_dict.get("steps"), data_dict.get("sleep_hours"), 
+                data_dict.get("calories_burned"), data_dict.get("avg_heart_rate"), 
+                data_dict.get("active_minutes")
+            ))
 
-    # Insert BMI Record if weight/height are found
-    if extracted_data.weight or extracted_data.height:
-        # Get existing values as fallback if only one is provided
-        cursor.execute("SELECT weight, height FROM UserBMIRecords WHERE user_id = ? ORDER BY datetime DESC LIMIT 1", (user_id,))
-        existing = cursor.fetchone()
+        conn.commit()
+    except Exception as e:
+        print(f"Error in save_extracted_profile: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
-        w = extracted_data.weight or (existing[0] if existing else None)
-        h = extracted_data.height or (existing[1] if existing else None)
 
-        cursor.execute(
-            "INSERT INTO UserBMIRecords (user_id, datetime, weight, height) VALUES (?, ?, ?, ?)",
-            (user_id, int(time.time()), w, h)
-        )
-
-    conn.commit()
-    conn.close()
+def create_invoke_qa(state: AgentState, node_name, prompt, response):
+    """
+    Docstring for create_invoke_qa
+    
+    :param state: Description
+    :type state: AgentState
+    """
+    state["invoke_qa"][node_name] = {
+        "prompt": prompt,
+        "response": str(response).strip()
+    }
+    return state
 
 
 
@@ -513,6 +603,7 @@ def rate_severity(state: AgentState):
         formatted_msgs = format_messages(state["messages"])
         response = rating_llm.invoke({"input": formatted_msgs})
         state["severity_rate"] = response.rate
+        state = create_invoke_qa(state, "rate_severity", system_prompt, response)
         # match = re.match(r"[0-5]", response.rate)
         # state["severity_rate"] = int(match.group(0)) if match else 0
     except Exception as e:
@@ -565,13 +656,6 @@ def extract_topic(state: AgentState):
         "Return ONLY a JSON object: {{\"has_info\": boolean}}"
     )
 
-    # We only look at the most recent message to save tokens
-    last_message = state["question"]
-    response = structured_llm.invoke([
-        ("system", system_prompt),
-        ("user", last_message)
-    ])
-
     try:
         response = structured_llm.invoke([
             ("system", system_prompt),
@@ -581,6 +665,8 @@ def extract_topic(state: AgentState):
             state["topic"] = 'update_ask'
         else:
             state["topic"] = 'ask'
+
+        state = create_invoke_qa(state, "extract_topic", system_prompt, response)
 
     except Exception as e:
         print(f"Topic Extraction Error: {e}. Falling back to 'ask'.")
@@ -612,18 +698,19 @@ def extract_profile(state: AgentState):
     # Use json_mode for better reliability in Thai/English mixed contexts
     structured_llm = llm.with_structured_output(ProfileStructure, method="json_mode")
 
-    system_prompt = """You are an expert data extraction bot specialized in Thai context.
-    Extract user profile information from the Thai conversation.
-
-    Rules:
-    1. Name: If a user provides a nickname (ชื่อเล่น), store it. If they provide both, prefer the formal name but note the nickname.
-    2. DOB: Thai users may use the Buddhist Era (ปี พ.ศ.). 
-    - Formula: A.D. = B.E. - 543. 
-    - Example: พ.ศ. 2539 becomes 1996.
-    3. Occupation: Translate Thai occupations to English (e.g., 'พนักงานออฟฟิศ' -> 'Office Worker').
-    4. Current Year: 2026.
-    5. Return your last answer in the JSON form.
-    6. If info is missing, return null. Do not hallucinate.
+    system_prompt = """You are an expert health data extraction bot. 
+    Extract user profile AND activity metrics from the conversation.
+    
+    Current Year: 2026.
+    
+    Specific Extraction Rules:
+    1. Names: Return as is (Either Thai script or Latin), do not transliterate.
+    2. Dates: Convert Thai Buddhist Era (พ.ศ.) to A.D. (A.D. = B.E. - 543).
+    3. BMI: Extract 'weight' (kg) and 'height' (cm).
+    4. Activity: Look for steps, sleep duration (hours), heart rate (bpm), and active minutes.
+    5. Translation: Translate Thai occupations or lifestyle descriptions to English.
+    6. Formatting: Return ISO dates (YYYY-MM-DD) for 'dob' if possible.
+    7. Nulls: If a piece of info is not mentioned, return null. Do not guess.
     """
 
     prompt = ChatPromptTemplate.from_messages([
@@ -635,6 +722,7 @@ def extract_profile(state: AgentState):
     extracted = chain.invoke({"input": messages})
 
     state["pending_extraction"] = extracted.model_dump(exclude_none=True)
+    state = create_invoke_qa(state, "extract_profile", system_prompt, extracted)
     return state
 
 
@@ -692,6 +780,7 @@ def generate_raw(state: AgentState):
     chain = prompt | llm
     response = chain.invoke({"input": formatted_input})
     state["response"] = response.content.strip() if hasattr(response, 'content') else str(response)
+    state = create_invoke_qa(state, "generate_raw", system_prompt, response)
     return state
 
 
@@ -789,9 +878,13 @@ def generate_response(
             "use_info": use_info,
             "is_new_user": False,
             "user_info": None,
+            "user_context": None,
             "pending_extraction": None,
 
             "use_rag": use_rag,
+            "documents": None,
+
+            "invoke_qa": {},
             "severity_rate": 0,
             "response": "",
             "interrupted": False
@@ -814,9 +907,14 @@ def save_summary_to_db(user_id, summary_dict):
     conn = connect_db()
     conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
-    
+
     today = date.today().isoformat()
-    
+
+    cursor.execute(
+        'INSERT OR IGNORE INTO "Users" (user_id) VALUES (?)', 
+        (user_id,)
+    )
+
     query = """
     INSERT INTO UserSummaryRecords (user_id, date, overview, office_risk, office_summary)
     VALUES (?, ?, ?, ?, ?)
@@ -830,8 +928,8 @@ def save_summary_to_db(user_id, summary_dict):
         cursor.execute(query, (
             user_id, 
             today, 
-            summary_dict.get("overview"), 
-            summary_dict.get("office_risk"), 
+            summary_dict.get("overview"),
+            summary_dict.get("office_risk"),
             summary_dict.get("office_summary")
         ))
         conn.commit()

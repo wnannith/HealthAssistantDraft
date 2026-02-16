@@ -353,9 +353,19 @@ async def summary(interaction):
 async def update_user(interaction, question: str):
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
-    response_text, _ = generate_response(history, user_id=interaction.user.id, topic='update')
+    _, state = generate_response(history, user_id=interaction.user.id, topic='update')
 
-    await interaction.followup.send(response_text)
+    if state.get("pending_extraction"):
+        pending = state["pending_extraction"]
+        # Filter out nulls for the display
+        display_info = "\n".join([f"**{k}**: {v}" for k, v in pending.items() if v])
+        embed = discord.Embed(
+            title="ยืนยันข้อมูลสุขภาพ",
+            description=f"ฉันตรวจพบข้อมูลใหม่ของคุณ ต้องการให้บันทึกไว้ไหม?\n\n{display_info}",
+            color=discord.Color.blue()
+        )
+        view = ProfileConfirmView(interaction.user.id, pending)
+        await interaction.followup.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="ask", description="Ask the bot a question. (Alternative to `!health` prefix in server channels)")
