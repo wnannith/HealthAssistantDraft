@@ -13,11 +13,10 @@
     * `!health`: interaction หลักของบอท  
     * `/ask`: คล้าย ๆ `!health`  
     * `/askraw`: คล้าย ๆ `!health` แต่บังคับไม่ใช้ RAG  
-    * `/summary`: สร้าง embed สรุปประจำวัน  
-
-    (โซนนี้ยังใช้ไม่ได้)  
+    * `/summary`: สร้าง embed สรุปประจำวัน
+    * `/log`: กรอกข้อมูลสุขภาพประจำวัน (จำนวนก้าวเดิน, active minutes, etc.)
     * `/update-user`: ใช้ update ข้อมูลผู้ใช้โดยตรง  
-    * `/reset-user`: ลบข้อมูลจาก database * 
+    * `/reset-user`: ลบข้อมูลจาก database
 
 - **Langchain + Langgraph** การเรียกคำตอบแต่ละครั้ง สามารถวาดเป็น flow/graph (รูปล่างสุด) ด้วย flow นี้ LLM สามารถทำ tool calling แบบต่าง ๆ เป็นลำดับที่วางไว้เพื่อตัดสินใจได้ดีกว่าเดิม
 
