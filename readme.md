@@ -1,4 +1,4 @@
-# บอทดิสคอร์ด ที่โหดที่สุดใน ๒๐๒๖ ใหญ่
+# Discord Health Assistant Chatbot
 
 > Run `app.py`
 
@@ -33,12 +33,6 @@
     * เพิ่ม `requirements.txt`
 
 
-![graph](imgs/ver1/graph.png)  
-*Workflow*  
-
-![example](imgs/ver1/example.png)  
-*ไม่ใช่ Gemini ผลลัพธ์แปลก ๆ แต่ก็ถือว่าใช้ได้อยู่ มั้ง*
-
 ## การติดตั้ง (?)
 
 1. **แก้ชื่อ `env.txt` เป็น `.env` และใส่ token ก่อน**  
@@ -56,6 +50,3 @@
 
 - นำโมเดล RAG ในรูป chroma db ใช้ประกอบการ generate  
 [RAG Agent](https://github.com/aliceheiman/YouTube/blob/main/nih-rag/)
-
-- เชื่อมต่อ Database เพื่อเก็บข้อมูลผู้ใช้  
-[SQL Agent](https://github.com/Mayurji/Explore-Libraries/blob/main/SQL-Agent/) 
