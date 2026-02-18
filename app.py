@@ -121,7 +121,7 @@ async def build_query_with_history(
     channel,
     user_id=None,
     current_content=None,
-    max_messages=25,
+    max_messages=4,
     time_threshold_seconds=600,
     same_day=False
 ):
