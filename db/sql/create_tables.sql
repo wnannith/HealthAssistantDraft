@@ -2,6 +2,7 @@ CREATE TABLE "Users" (
 	"user_id" INTEGER NOT NULL UNIQUE,
 	"name" TEXT,
 	"dob" TEXT,
+	"gender" TEXT,
 	"occupation" TEXT,
 	"description" TEXT,
 	"chronic_disease" TEXT,

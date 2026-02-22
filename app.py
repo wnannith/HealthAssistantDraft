@@ -25,26 +25,41 @@ bot = commands.Bot(command_prefix='!',
 
 
 class ProfileConfirmView(discord.ui.View):
-    """
-    Docstring for ProfileConfirmView
-    """
     def __init__(self, user_id, extracted_data):
-        super().__init__(timeout=60) # 1 minute to click
+        super().__init__(timeout=180)
         self.user_id = user_id
         self.data = extracted_data
 
     @discord.ui.button(label="Confirm & Save", style=discord.ButtonStyle.green, emoji="✅")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # ตรวจสอบสิทธิ์ (เฉพาะเจ้าของข้อมูลเท่านั้นที่กดได้)
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("ขออภัยค่ะ ปุ่มนี้สำหรับเจ้าของข้อมูลเท่านั้น", ephemeral=True)
+
         try:
-            # We use the saver function we built earlier
-            save_extracted_profile(self.user_id, ProfileStructure(**self.data))
-            await interaction.response.edit_message(content="✅ ข้อมูลของคุณถูกบันทึกเรียบร้อยแล้ว!", view=None)
+            # ใช้ Pydantic Model แปลงข้อมูลดิบและบันทึก
+            profile_obj = ProfileStructure(**self.data)
+            save_extracted_profile(self.user_id, profile_obj)
+            
+            # แก้ไข Embed เดิมเพื่อแจ้งสถานะสำเร็จ
+            await interaction.response.edit_message(
+                content=f"✅ ข้อมูลของ <@{self.user_id}> ถูกบันทึกเรียบร้อยแล้ว!", 
+                embed=None, 
+                view=None
+            )
         except Exception as e:
-            await interaction.response.send_message(f"Error saving: {e}", ephemeral=True)
+            print(f"Error saving profile: {e}")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"เกิดข้อผิดพลาดในการบันทึก: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"เกิดข้อผิดพลาดในการบันทึก: {e}", ephemeral=True)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="ยกเลิกการบันทึกข้อมูล", view=None)
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("ขออภัยค่ะ ปุ่มนี้สำหรับเจ้าของข้อมูลเท่านั้น", ephemeral=True)
+            
+        await interaction.response.edit_message(content="ยกเลิกการบันทึกข้อมูลเรียบร้อย", embed=None, view=None)
 
 
 class ResetConfirmView(discord.ui.View):
@@ -74,7 +89,7 @@ class ResetConfirmView(discord.ui.View):
 
             await interaction.response.edit_message(content="🗑️ ข้อมูลของคุณถูกลบออกจากระบบโดยถาวรแล้ว", view=None)
         except Exception as e:
-            await interaction.response.send_message(f"เกิดข้อผิดพลาด: {e}", ephemeral=True)
+            await interaction.response.send_message(f"เกิดข้อผิดพลาด: {e}")
 
     @discord.ui.button(label="ยกเลิก", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -125,47 +140,61 @@ async def build_query_with_history(
     time_threshold_seconds=600,
     same_day=False
 ):
-    """
-    ดึงประวัติการสนทนาโดยรวมเนื้อหาจาก Embeds และตัด Disclaimer ออก
-    """
     messages = []
     now = discord.utils.utcnow()
     last_ts = now
     
-    # ข้อความที่ต้องการตัดออกจากประวัติ (Disclaimer)
+    # หัวข้อ Embed ที่เป็นเรื่องระบบและควรข้าม
+    ignored_titles = ["⚠️ ยืนยันการลบข้อมูล", "ยืนยันการลบข้อมูล", "Error", "🗑️ ลบข้อมูลเรียบร้อย"]
     disclaimer = "\n\n-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง\n"
     
     cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0) if same_day else None
 
     async for prev in channel.history(limit=100, before=now, after=cutoff, oldest_first=False):
-        # 1. Filter: กรองเฉพาะบอทตัวเองและ User ที่ระบุ
+        # 1. กรอง Author ทั่วไป
         if prev.author.bot and prev.author != bot.user:
             continue
         if user_id and not prev.author.bot and prev.author.id != user_id:
             continue
 
-        # 2. รวมเนื้อหาจาก Text และ Embeds
+        # 2. ตรวจสอบ Embed และเงื่อนไขการลบข้อมูล
+        should_ignore = False
+        if prev.embeds:
+            for embed in prev.embeds:
+                # เช็ค Title ว่าเป็นเรื่องระบบหรือไม่
+                is_system_title = any(title in (embed.title or "") for title in ignored_titles)
+                
+                if is_system_title:
+                    # ถ้าเป็น Embed ของบอท ให้เช็คว่า "เกี่ยวกับ User คนนี้หรือไม่"
+                    # โดยตรวจสอบจาก Footer หรือ Author ใน Embed ที่เรามักระบุชื่อ user ไว้
+                    # หรือตรวจสอบว่านี่เป็น Interaction ของ user_id นี้
+                    should_ignore = True
+                    break
+        
+        if should_ignore:
+            continue
+
+        # 3. ดึงเนื้อหา (ข้ามหากเป็นข้อความว่างหลังจากกรอง)
         full_content = prev.content if prev.content else ""
         
         if prev.author == bot.user and prev.embeds:
             embed_texts = []
             for embed in prev.embeds:
+                # กรองเนื้อหาใน Embed
                 if embed.title: embed_texts.append(f"Title: {embed.title}")
                 if embed.description: embed_texts.append(embed.description)
                 for field in embed.fields:
                     embed_texts.append(f"{field.name}: {field.value}")
             
-            embed_combined = "\n".join(embed_texts)
-            full_content = f"{full_content}\n{embed_combined}".strip()
+            full_content = f"{full_content}\n" + "\n".join(embed_texts).strip()
 
-        # 3. ล้าง Disclaimer ออกจากเนื้อหาเพื่อให้ LLM ได้รับข้อมูลที่สะอาด
+        # ลบ Disclaimer
         full_content = full_content.replace(disclaimer, "").strip()
 
-        # ข้ามข้อความที่ว่างเปล่า
         if not full_content:
             continue
 
-        # 4. ตรวจสอบช่วงเวลา (Time Gap)
+        # 4. Check Time Gap & Role Mapping
         if not same_day:
             gap = (last_ts - prev.created_at).total_seconds()
             if gap > time_threshold_seconds and len(messages) > 0:
@@ -181,31 +210,50 @@ async def build_query_with_history(
     messages.reverse()
     
     if current_content:
-        # ตัด Disclaimer จากคำถามปัจจุบันด้วย (เผื่อกรณีมีการ Copy มาวาง)
-        clean_current = current_content.replace(disclaimer, "").strip()
-        messages.append({"role": "user", "content": clean_current})
+        messages.append({"role": "user", "content": current_content.replace(disclaimer, "").strip()})
         
     return messages
 
 
-async def send_long_message(ctx_or_interaction, text):
-    """Splits a string into chunks of 1900 characters and sends them."""
-    # Safety check for empty text
+async def send_response_safely(target, text: str, waiting_msg: discord.Message = None):
+    """
+    ส่งข้อความแบบแบ่ง Chunk และลบข้อความรอ พร้อมควบคุม Disclaimer ไม่ให้ซ้ำซ้อน
+    """
+    disclaimer = "-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง"
+    full_disclaimer = f"\n\n{disclaimer}\n"
+
     if not text:
+        if waiting_msg:
+            await waiting_msg.delete()
         return
 
-    # Split by chunks
-    chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
-    
+    if waiting_msg:
+        try:
+            await waiting_msg.delete()
+        except:
+            pass
+
+    clean_text = text.replace(full_disclaimer, "").replace(disclaimer, "").strip()
+    chunks = [clean_text[i:i+1900] for i in range(0, len(clean_text), 1900)]
+
+    if chunks:
+        chunks[-1] = chunks[-1] + full_disclaimer
+    else:
+        # กรณี clean_text ว่างเปล่า (เช่น มีแต่ disclaimer อย่างเดียว)
+        chunks = [full_disclaimer.strip()]
+
+    # 4. เริ่มส่งข้อความ
     for chunk in chunks:
-        # Check if it's an interaction (slash command) or a context/message
-        if isinstance(ctx_or_interaction, discord.Interaction):
-            if ctx_or_interaction.response.is_done():
-                await ctx_or_interaction.followup.send(chunk)
+        try:
+            if isinstance(target, discord.Interaction):
+                if target.response.is_done():
+                    await target.followup.send(chunk)
+                else:
+                    await target.response.send_message(chunk)
             else:
-                await ctx_or_interaction.response.send_message(chunk)
-        else:
-            await ctx_or_interaction.send(chunk)
+                await target.send(chunk)
+        except Exception as e:
+            print(f"Error sending chunk: {e}")
 
 
 @bot.event
@@ -228,14 +276,15 @@ async def on_message(message):
         content = message.content.replace(channel_prefix, "", 1).strip()
 
         if not content and not isinstance(message.channel, discord.DMChannel):
-            await message.channel.send("สวัสดีค่ะ! ต้องการให้ช่วยเรื่องสุขภาพด้านไหนคะ? (พิมพ์ข้อความหลัง !health ได้เลย)")
+            await message.channel.send("สวัสดีครับ! มีคำถาม หรือต้องการให้ช่วยเรื่องสุขภาพด้านไหนครับ? (พิมพ์ข้อความหลัง !health ได้เลย)")
             return
 
+        waiting_msg = await message.channel.send("⏳ *กำลังประมวลผลข้อมูลของคุณ กรุณารอสักครู่...*")
         history = await build_query_with_history(message.channel, user_id=message.author.id, current_content=content)
         response_text, state = generate_response(history, user_id=message.author.id)
 
         if response_text:
-            await send_long_message(message.channel, response_text)
+            await send_response_safely(message.channel, response_text, waiting_msg)
 
         if state.get("pending_extraction"):
             pending = state["pending_extraction"]
@@ -243,16 +292,17 @@ async def on_message(message):
             display_info = "\n".join([f"**{k}**: {v}" for k, v in pending.items() if v])
             embed = discord.Embed(
                 title="ยืนยันข้อมูลสุขภาพ",
-                description=f"ฉันตรวจพบข้อมูลใหม่ของคุณ ต้องการให้บันทึกไว้ไหม?\n\n{display_info}",
+                description=f"ตรวจพบข้อมูลใหม่ของคุณ ต้องการให้บันทึกไว้ไหมครับ (ข้อมูลนี้จะถูกใช้ในการตอบคำถามครั้งต่อ ๆ ไป)\n\n{display_info}",
                 color=discord.Color.blue()
             )
+            embed.set_author(name=message.author.name, icon_url=str(message.author.avatar))
             view = ProfileConfirmView(message.author.id, pending)
             await message.channel.send(embed=embed, view=view)
 
         if state.get("interrupted"):
             severe_embed = discord.Embed(
                 title="คำเตือน",
-                description="อาการของคุณอยู่ในขั้นรุนแรงและน่าเป็นห่วงอย่างมาก กรุณาติดต่อสายด่วน และเข้ารับการกำกับดูแลโดยเร็วที่สุด",
+                description="อาการของคุณอยู่ในขั้นรุนแรงและน่าเป็นห่วงอย่างมาก กรุณาขอความช่วยเหลือ หรือติดต่อสายด่วน และเข้ารับการกำกับดูแลโดยเร็วที่สุด",
                 color=discord.Color.red()
             )
             await message.channel.send(embed=severe_embed)
@@ -319,10 +369,10 @@ async def summary(interaction):
         embed.add_field(name='Name', value=name, inline=False)
         embed.add_field(name='Height', value=f"{height} CM", inline=True)
         embed.add_field(name='Weight', value=f"{weight} KG", inline=True)
-        embed.add_field(name='Overview', value=overview, inline=False)
-        embed.add_field(name='Office Syndrome', value='', inline=False)
-        embed.add_field(name='Risk', value=office_risk, inline=False)
-        embed.add_field(name='', value=office_summary, inline=False)
+        embed.add_field(name='Overview', value=overview, inline=True)
+        embed.add_field(name='Office Syndrome', value='', inline=True)
+        embed.add_field(name='Risk', value=office_risk, inline=True)
+        embed.add_field(name='', value=office_summary, inline=True)
         embed.set_footer(text="ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง")
 
     nomsg_embed = discord.Embed(
@@ -349,10 +399,10 @@ async def summary(interaction):
 
 
 @bot.tree.command(name="update-user", description="Update your personal profile with your words.")
-@app_commands.describe(question="Your info...")
-async def update_user(interaction, question: str):
+@app_commands.describe(info="Your info...")
+async def update_user(interaction, info: str):
     await interaction.response.defer(thinking=True)
-    history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
+    history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=info)
     _, state = generate_response(history, user_id=interaction.user.id, topic='update')
 
     if state.get("pending_extraction"):
@@ -361,9 +411,10 @@ async def update_user(interaction, question: str):
         display_info = "\n".join([f"**{k}**: {v}" for k, v in pending.items() if v])
         embed = discord.Embed(
             title="ยืนยันข้อมูลสุขภาพ",
-            description=f"ฉันตรวจพบข้อมูลใหม่ของคุณ ต้องการให้บันทึกไว้ไหม?\n\n{display_info}",
+            description=f"ตรวจพบข้อมูลใหม่ของคุณ ต้องการให้บันทึกไว้ไหมครับ (ข้อมูลนี้จะถูกใช้ในการตอบคำถามครั้งต่อ ๆ ไป)\n\n{display_info}",
             color=discord.Color.blue()
         )
+        embed.set_author(name=interaction.user.name, icon_url=str(interaction.user.avatar))
         view = ProfileConfirmView(interaction.user.id, pending)
         await interaction.followup.send(embed=embed, view=view)
 
@@ -381,8 +432,7 @@ async def ask(interaction, question: str):
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
     response_text, _ = generate_response(history, user_id=interaction.user.id, topic='ask')
-
-    await interaction.followup.send(response_text)
+    await send_long_message(interaction.channel, response_text)
 
 
 @bot.tree.command(name="askraw", description="[For Testing Only] Ask the bot a question without RAG.")
@@ -398,8 +448,7 @@ async def askraw(interaction, question: str):
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
     response_text, _ = generate_response(history, user_id=None, use_info=False, use_rag=False, topic='ask')
-
-    await interaction.followup.send(response_text)
+    await send_long_message(interaction.channel, response_text)
 
 
 @bot.tree.command(name="log", description="Manually log your daily health stats.")
@@ -452,14 +501,14 @@ async def reset_user(interaction: discord.Interaction):
         description=(
             "การดำเนินการนี้จะลบ:\n"
             "- ประวัติส่วนตัว (ชื่อ, อาชีพ, โรคประจำตัว)\n"
-            "- บันทึกน้ำหนักและส่วนสูงทั้งหมด\n\n"
+            "- ข้อมูลน้ำหนัก ส่วนสูง และบันทึกกิจกรรมทั้งหมด\n\n"
             "**ข้อมูลนี้ไม่สามารถกู้คืนได้ คุณแน่ใจหรือไม่?**"
         ),
         color=discord.Color.red()
     )
-
+    embed.set_author(name=interaction.user.name, icon_url=str(interaction.user.avatar))
     view = ResetConfirmView(interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 @bot.event

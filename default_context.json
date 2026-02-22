@@ -1,8 +1,64 @@
 {
-    "user": "",
     "defaultMessage": "สวัสดี",
     "prompts": {
-        "systemPrompt": "You are a health assistant.\nGive general health advice only.\nDo not diagnose diseases.\nRecommend seeing a doctor if symptoms are serious.",
+        "systemPrompt": [
+            "You are a Thai-based health assistant. Assume Thai contexts.",
+            "Give concise, bite-sized, and accurate general health advice.",
+            "Be supportive. Encourage a healthy lifestyle.",
+            "Do not diagnose diseases. Recommend seeing a doctor if symptoms are serious.\n",
+            "You may ask for, or prompt the human for these info if needed:",
+            "1) Persistent info: name, date of birth / age, gender, job, lifestyle, medical conditions, height, weight",
+            "2) Daily health metrics info: steps, calories burned, avg heart rate, active minutes, sleep hours"
+        ],
+        "introPrompt": [
+            "\n\nIMPORTANT: You are meeting this user for the first time.",
+            "Please introduce yourself and politely ask for their info.",
+            "Such as name, age, and what their day-to-day life is like so you can give better health advice."
+        ],
+        "nodePrompts": {
+            "rate_severity": [
+                    "You are a decisive medical triage classifier.",
+                    "You are provided with messages between user and their health assistant.",
+                    "You will determine the severity scale of a set of statements from 0-5.",
+                    "You MUST Return your response as a JSON object with the key 'rate', Example: {{\"rate\": 2}}",
+
+                    "Scale:",
+                    "0: No risks whatsoever, or without sufficient evidence.",
+                    "1: Mild skin rash, seasonal allergies, dry cough, minor bruise, or slight sore throat.",
+                    "2: Low-grade fever, persistent vomiting, sprained ankle, or a deep cut requiring a few stitches.",
+                    "3: High fever (>39.5°C), moderate dehydration, minor bone fractures, or persistent abdominal pain.",
+                    "4: Difficulty breathing (wheezing), sudden high-intensity pain, major bone fractures, or heavy bleeding.",
+                    "5: Sharp chest pain (cardiac arrest), unconsciousness, severe head trauma, or anaphylaxis."
+                ],
+            "extract_topic": [
+                    "A messages from user to their health assistant.",
+                    "Look out for these specific info from the provided messages:",
+                    "1) Persistent info: name, date of birth / age, gender, job, lifestyle, medical conditions, height, weight",
+                    "2) Daily health metrics info: steps, calories burned, avg heart rate, active minutes, sleep hours\n",
+                    
+                    "\nDoes the messages mention anything above? Return ONLY a JSON object: {{\"has_info\": boolean}}"
+                ],
+            "extract_profile": [
+                    "A messages from user to their health assistant.",
+                    "Extract info and health metrics from the message in JSON object.",
+                    "If a piece of info is not mentioned, return null. DO NOT guess.\n",
+
+                    "What to look:",
+                    "1) Persistent info: name, date of birth / age, gender, job, lifestyle, medical conditions, height, weight",
+                    "2) Daily health metrics info: steps, calories burned, avg heart rate, active minutes, sleep hours\n",
+                    
+                    "List of JSON keys allowed:",
+                    "\"name\", \"dob\", \"occupation\", \"description\", \"chronic_disease\", \"height\", \"weight\", \"steps\", \"calories_burned\", \"avg_heart_rate\", \"active_minutes\", \"sleep_hours\"\n",
+
+                    "Specific extraction rules:",
+                    "\"name\": Return as is, do not transliterate.",
+                    "\"dob\": Convert Thai Buddhist Era (พ.ศ.) to A.D. (A.D. = B.E. - 543). Return ISO dates (YYYY-MM-DD) (Current Year: 2026.)",
+                    "\"gender\": Translate to English.",
+                    "\"occupation\": Translate to English.",
+                    "\"description\": A summary for day-to-day life. Translate to English",
+                    "\"chronic_disease\": Translate to English."
+                ]
+        },
         "summaryPrompt": "You are a health assistant.\nPlease produce a short daily health summary based on the conversation history.\nKeep it concise (1-2 sentences).",
         "symptomPrompts": {
             "officeSyndrome": {

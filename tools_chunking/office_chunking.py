@@ -30,14 +30,13 @@ text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100
 docs = [Document(page_content=full_text)]
 splits = text_splitter.split_documents(docs)
 
-
 # STEP 3: SAVE TO DISK (Chroma)
 vector_store = Chroma.from_documents(
-    documents=splits,
-    collection_name="office-syndrome",
-    embedding=embeddings,
-    persist_directory="./chroma/office-syndrome.db",
-    client_settings=Settings(
+    documents = splits,
+    collection_name = "office-syndrome",
+    embedding = embeddings,
+    persist_directory = Path(__file__).parent.parent / "/db/office-syndrome.db",
+    client_settings = Settings(
         anonymized_telemetry=False,
         is_persistent=True,
     ),

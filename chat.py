@@ -105,6 +105,7 @@ class ProfileStructure(BaseModel):
     # User Table
     name: Optional[str] = None
     dob: Optional[str] = None
+    gender: Optional[str] = None
     occupation: Optional[str] = None
     description: Optional[str] = None
     chronic_disease: Optional[str] = None
@@ -148,13 +149,17 @@ def get_prompt(key, default="", fmt_vars=None):
             return default
 
     # If we found a string and formatting vars are provided, try formatting
-    if isinstance(node, str) and fmt_vars:
-        try:
-            return node.format(**fmt_vars)
-        except Exception:
-            return node
+    opt = node
+    if isinstance(opt, list):
+        opt = "\n".join(node)
 
-    return node
+    if isinstance(opt, str) and fmt_vars:
+        try:
+            return opt.format(**fmt_vars)
+        except Exception:
+            return opt
+
+    return opt
 
 
 # Load system prompt from .json
@@ -177,13 +182,6 @@ def load_llm():
     :return: Description
     :rtype: Any
     """
-    google_llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite",
-        temperature=1.0,
-        timeout=None,
-        max_retries=2,
-        max_tokens=4800
-    )
 
     typhoon_llm = init_chat_model(
         model="typhoon-v2.5-30b-a3b-instruct",
@@ -193,9 +191,7 @@ def load_llm():
         max_tokens=4800
     )
 
-    if ALTER:
-        return typhoon_llm
-    return google_llm
+    return typhoon_llm
 
 
 def load_chroma(chroma_name=''):
@@ -210,12 +206,6 @@ def load_chroma(chroma_name=''):
             api_key=os.getenv("GOOGLE_API_KEY"),
             model="models/gemini-embedding-001"
         )
-
-        if ALTER:
-            embeddings = OpenAIEmbeddings(
-                model="text-embedding-3-small",
-                openai_api_key=os.getenv("OPENAI_API_KEY")
-            )
 
         vectorstore = Chroma(
             embedding_function=embeddings,
@@ -241,29 +231,36 @@ def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
 
-def format_messages(messages):
+def format_messages(messages, max_chars=12000):
     """
-    Docstring for format_messages
-    
-    :param messages: Description
-    :return: Description
-    :rtype: Any
+    แปลงข้อความเป็น String โดยเลือกเก็บข้อความล่าสุด (Bottom-up) 
+    เพื่อให้ไม่เกินขีดจำกัดของ Token (ประมาณ 4,000 tokens สำหรับไทย-อังกฤษ)
     """
-    parsed_messages = ""
-    for msg in messages:
-        # Handle dicts {"role", "content"} and BaseMessage objects
+    parsed_lines = []
+    current_length = 0
+
+    for msg in reversed(messages):
         if isinstance(msg, dict):
             role = msg.get("role", "user")
             content = msg.get("content", "")
         else:
-            # BaseMessage objects have .type and .content attributes
             role = msg.type if hasattr(msg, 'type') else 'user'
             content = msg.content if hasattr(msg, 'content') else str(msg)
 
         if not content:
             continue
-        parsed_messages += f"{role}: {content.strip()}\n"
-    return parsed_messages.strip()
+
+        formatted_line = f"{role}: {content.strip()}\n"
+
+        if current_length + len(formatted_line) > max_chars:
+            break
+            
+        parsed_lines.append(formatted_line)
+        current_length += len(formatted_line)
+
+    parsed_lines.reverse()
+    
+    return "".join(parsed_lines).strip()
 
 
 def connect_db():
@@ -322,6 +319,7 @@ def fetch_user_info(user_id: int):
         return {
             "name": row["name"] or "Unknown",
             "age": age,
+            "gender": row["gender"] or "Not specified",
             "occupation": row["occupation"] or "None",
             "lifestyle": row["description"] or "None",
             "chronic": row["chronic_disease"] or "None",
@@ -335,8 +333,8 @@ def fetch_user_info(user_id: int):
                 "active_minutes": row["t_min"] or 0
             },
             "summary": {
-                "overview": row["s_overview"] or "No previous summary",
-                "office_risk": row["s_risk"] or "Unknown",
+                "overview": row["s_overview"] or "None",
+                "office_risk": row["s_risk"] or "None",
                 "office_summary": row["s_office"] or "None"
             }
         }
@@ -377,6 +375,7 @@ def format_user_info(user_info: dict):
     profile = []
     if user_info.get('name'): profile.append(f"Name: {user_info['name']}")
     if user_info.get('age') and user_info['age'] != "Unknown": profile.append(f"Age: {user_info['age']}")
+    if user_info.get('gender') and user_info['gender'] != "Not specified": profile.append(f"Gender: {user_info['gender']}")
     if user_info.get('occupation'): profile.append(f"Occupation: {user_info['occupation']}")
     
     bmi_info = get_bmi_analysis(user_info.get('weight'), user_info.get('height'))
@@ -406,11 +405,13 @@ def format_user_info(user_info: dict):
     # --- 3. Previous Summary ---
     sum_data = user_info.get('summary', {})
     summary = []
-    if sum_data.get('office_risk') and sum_data['office_risk'] != "Unknown":
-        summary.append(f"- Risk: {sum_data['office_risk']}")
-    if sum_data.get('overview') and "No previous" not in sum_data['overview']:
+    if sum_data.get('overview') and sum_data['overview'] != 'None':
         summary.append(f"- Last Overview: {sum_data['overview']}")
-        
+    if sum_data.get('office_risk') and sum_data['office_risk'] != "None":
+        summary.append(f"- Office Syndrome Risk: {sum_data['office_risk']}")
+    if sum_data.get('office_summary') and sum_data['office_summary'] != "None":
+        summary.append(f"- Office Syndrome Summary: {sum_data['office_summary']}")
+
     if summary:
         sections.append("### Previous Health Summary\n" + "\n".join(summary))
 
@@ -418,13 +419,6 @@ def format_user_info(user_info: dict):
 
 
 def save_extracted_profile(user_id, extracted_data: ProfileStructure):
-    """
-    Docstring for save_extracted_profile
-    
-    :param user_id: Description
-    :param extracted_data: Description
-    :type extracted_data: ProfileStructure
-    """
     conn = connect_db()
     conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
@@ -432,18 +426,31 @@ def save_extracted_profile(user_id, extracted_data: ProfileStructure):
     data_dict = extracted_data.model_dump(exclude_none=True)
 
     try:
-        # 1. Update Users Table
-        user_fields = ["name", "dob", "occupation", "description", "chronic_disease"]
-        update_parts = []
-        user_params = []
-        for field in user_fields:
-            if field in data_dict:
-                update_parts.append(f"{field} = ?")
-                user_params.append(data_dict[field])
-        
-        if update_parts:
-            user_params.append(user_id)
-            cursor.execute(f"UPDATE Users SET {', '.join(update_parts)} WHERE user_id = ?", user_params)
+        # 1. Upsert Users Table
+        user_fields = ["name", "dob", "gender", "occupation", "description", "chronic_disease"]
+        if any(field in data_dict for field in user_fields):
+            cursor.execute(
+                """
+                    INSERT INTO Users (user_id, name, dob, gender, occupation, description, chronic_disease)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        name = COALESCE(excluded.name, name),
+                        dob = COALESCE(excluded.dob, dob),
+                        gender = COALESCE(excluded.gender, gender),
+                        occupation = COALESCE(excluded.occupation, occupation),
+                        description = COALESCE(excluded.description, description),
+                        chronic_disease = COALESCE(excluded.chronic_disease, chronic_disease)
+                """
+                , (
+                    user_id,
+                    data_dict.get("name"),
+                    data_dict.get("dob"),
+                    data_dict.get("gender"),
+                    data_dict.get("occupation"),
+                    data_dict.get("description"),
+                    data_dict.get("chronic_disease")
+                )
+            )
 
         # 2. Upsert BMI Records (Weight/Height)
         if "weight" in data_dict or "height" in data_dict:
@@ -569,20 +576,7 @@ def rate_severity(state: AgentState):
     :rtype: Any
     """
 
-    system_prompt = """You are a decisive medical classifier.
-    You are provided with messages between user and their health assistant.
-    You MUST determine the severity scale of a set of statements.
-    You MUST Return your response as a JSON object with the key 'rate'.
-    Example: {{"rate": 2}}
-
-    Scale:
-    0: No risks whatsoever, or without sufficient evidence.
-    1: Mild skin rash, seasonal allergies, dry cough, minor bruise, or slight sore throat.
-    2: Low-grade fever, persistent vomiting, sprained ankle, or a deep cut requiring a few stitches.
-    3: High fever (>39.5°C), moderate dehydration, minor bone fractures, or persistent abdominal pain.
-    4: Difficulty breathing (wheezing), sudden high-intensity pain, major bone fractures, or heavy bleeding.
-    5: Sharp chest pain (cardiac arrest), unconsciousness, severe head trauma, or anaphylaxis.
-    """
+    system_prompt = get_prompt("prompts.nodePrompts.rate_severity")
 
     user_context = state.get("user_context")
     if user_context:
@@ -649,17 +643,12 @@ def extract_topic(state: AgentState):
 
     llm = load_llm()
     structured_llm = llm.with_structured_output(TopicChecklist, method="json_mode")
-
-    system_prompt = (
-        "You are a linguistic classifier. Analyze the user's message for provided specific thing(s):\n"
-        "1. has_info: Does the user provide personal details (name, weight, job, etc.)?\n"
-        "Return ONLY a JSON object: {{\"has_info\": boolean}}"
-    )
+    system_prompt = get_prompt("prompts.nodePrompts.extract_topic")
 
     try:
         response = structured_llm.invoke([
             ("system", system_prompt),
-            ("user", state["question"])
+            ("user", state.get("question"))
         ])
         if response.has_info:
             state["topic"] = 'update_ask'
@@ -693,25 +682,11 @@ def extract_profile(state: AgentState):
     """
     Extracts structured user data from a list of messages.
     """
-    messages = format_messages(state.get("messages"))
     llm = load_llm()
     # Use json_mode for better reliability in Thai/English mixed contexts
     structured_llm = llm.with_structured_output(ProfileStructure, method="json_mode")
 
-    system_prompt = """You are an expert health data extraction bot. 
-    Extract user profile AND activity metrics from the conversation.
-    
-    Current Year: 2026.
-    
-    Specific Extraction Rules:
-    1. Names: Return as is (Either Thai script or Latin), do not transliterate.
-    2. Dates: Convert Thai Buddhist Era (พ.ศ.) to A.D. (A.D. = B.E. - 543).
-    3. BMI: Extract 'weight' (kg) and 'height' (cm).
-    4. Activity: Look for steps, sleep duration (hours), heart rate (bpm), and active minutes.
-    5. Translation: Translate Thai occupations or lifestyle descriptions to English.
-    6. Formatting: Return ISO dates (YYYY-MM-DD) for 'dob' if possible.
-    7. Nulls: If a piece of info is not mentioned, return null. Do not guess.
-    """
+    system_prompt = get_prompt("prompts.nodePrompts.extract_profile")
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
@@ -719,7 +694,7 @@ def extract_profile(state: AgentState):
     ])
 
     chain = prompt | structured_llm
-    extracted = chain.invoke({"input": messages})
+    extracted = chain.invoke({"input": state.get("question")})
 
     state["pending_extraction"] = extracted.model_dump(exclude_none=True)
     state = create_invoke_qa(state, "extract_profile", system_prompt, extracted)
@@ -756,11 +731,7 @@ def generate_raw(state: AgentState):
     if user_context and state.get("use_info"):
         system_prompt += f"\n\nYou are assisting the following user:\n{user_context}"
     elif state.get("is_new_user"):
-        system_prompt += (
-            "\n\nIMPORTANT: You are meeting this user for the first time. "
-            "Please introduce yourself and politely ask for their name, age, "
-            "and what they do for a living so you can give better health advice."
-        )
+        system_prompt += get_prompt("prompts.introPrompt")
 
     documents = state.get("documents")
     if documents:
@@ -892,8 +863,6 @@ def generate_response(
     )
 
     response = result["response"]
-    response += "\n\n-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง\n"
-
     return response, result
 
 
