@@ -2,11 +2,18 @@
     "defaultMessage": "สวัสดี",
     "prompts": {
         "systemPrompt": [
-            "You are a Thai-based health assistant. Assume Thai contexts.",
-            "Give concise, bite-sized, and accurate general health advice.",
+            "You are a Thai-based health assistant, specialized in Office Syndrome-related symptoms.",
+            "Prioritize answering in Thai. Use the masculine manner of speech.",
+            "Assume Thai contexts for activity, food, and other aspects of advices.",
             "Be supportive. Encourage a healthy lifestyle.",
             "Do not diagnose diseases. Recommend seeing a doctor if symptoms are serious.\n",
-            "You may ask for, or prompt the human for these info if needed:",
+
+            "What the human might do. And how you should reply.",
+            "1) Send a simple greeting, or have a casual conversation: Reply with a short, friendly response.",
+            "2) Seek a medical advise (especially Office Syndrome-related): Give a concise, bite-sized, and accurate general health advice.",
+            "3) End the conversation: Reply appropriately, encourage the human to keep in touch.\n",
+
+            "You may ask for, or prompt the human for these info ONLY if needed:",
             "1) Persistent info: name, date of birth / age, gender, job, lifestyle, medical conditions, height, weight",
             "2) Daily health metrics info: steps, calories burned, avg heart rate, active minutes, sleep hours"
         ],
@@ -33,10 +40,9 @@
             "extract_topic": [
                     "A messages from user to their health assistant.",
                     "Look out for these specific info from the provided messages:",
-                    "1) Persistent info: name, date of birth / age, gender, job, lifestyle, medical conditions, height, weight",
+                    "1) Persistent info: name, date of birth (or age), gender, job, lifestyle, medical conditions, height, weight",
                     "2) Daily health metrics info: steps, calories burned, avg heart rate, active minutes, sleep hours\n",
-                    
-                    "\nDoes the messages mention anything above? Return ONLY a JSON object: {{\"has_info\": boolean}}"
+                    "Does the messages mention anything above? Return ONLY a JSON object: {{\"has_info\": boolean}}"
                 ],
             "extract_profile": [
                     "A messages from user to their health assistant.",
@@ -44,7 +50,7 @@
                     "If a piece of info is not mentioned, return null. DO NOT guess.\n",
 
                     "What to look:",
-                    "1) Persistent info: name, date of birth / age, gender, job, lifestyle, medical conditions, height, weight",
+                    "1) Persistent info: name, date of birth (or age), gender, job, lifestyle, medical conditions, height, weight",
                     "2) Daily health metrics info: steps, calories burned, avg heart rate, active minutes, sleep hours\n",
                     
                     "List of JSON keys allowed:",
@@ -52,7 +58,8 @@
 
                     "Specific extraction rules:",
                     "\"name\": Return as is, do not transliterate.",
-                    "\"dob\": Convert Thai Buddhist Era (พ.ศ.) to A.D. (A.D. = B.E. - 543). Return ISO dates (YYYY-MM-DD) (Current Year: 2026.)",
+                    "\"dob\": Prefer date to age. Return ISO dates (YYYY-MM-DD). Convert Thai Buddhist Era (พ.ศ.) to A.D. (A.D. = B.E. - 543).",
+                    "If age and only age is provided instead, derive the date of birth by their age (Current Year: 2026.)",
                     "\"gender\": Translate to English.",
                     "\"occupation\": Translate to English.",
                     "\"description\": A summary for day-to-day life. Translate to English",

@@ -49,3 +49,11 @@ CREATE TABLE "UserActivityRecords" (
     FOREIGN KEY("user_id") REFERENCES "Users"("user_id"),
 	UNIQUE(user_id, date)
 );
+
+CREATE TABLE "MessageMappings" (
+	message_id INTEGER PRIMARY KEY,
+	user_id INTEGER NOT NULL,
+	timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_id ON MessageMappings(user_id)

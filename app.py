@@ -11,9 +11,9 @@ from typing import Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
-from chat import get_prompt, generate_response, generate_summary, connect_db, save_extracted_profile, ProfileStructure
+from chat import generate_response, generate_summary, connect_db, save_extracted_profile, ProfileStructure
 from server import server_on
 
 
@@ -77,8 +77,9 @@ class ResetConfirmView(discord.ui.View):
             conn = connect_db()
             conn.execute("PRAGMA foreign_keys = ON")
             cursor = conn.cursor()
-            
+
             # Delete from both tables (Foreign key handles records if configured, but manual is safer)
+            cursor.execute("DELETE FROM MessageMappings WHERE user_id = ?", (self.user_id,))
             cursor.execute("DELETE FROM UserSummaryRecords WHERE user_id = ?", (self.user_id,))
             cursor.execute("DELETE FROM UserActivityRecords WHERE user_id = ?", (self.user_id,))
             cursor.execute("DELETE FROM UserBMIRecords WHERE user_id = ?", (self.user_id,))
@@ -132,128 +133,146 @@ def save_bmi_to_db(user_id, date_str, weight, height):
     conn.close()
 
 
-async def build_query_with_history(
-    channel,
-    user_id=None,
-    current_content=None,
-    max_messages=4,
-    time_threshold_seconds=600,
-    same_day=False
-):
+async def send_response_safely(target, text: str, waiting_msg: discord.Message = None, reply_to_id: int = None):
+    """ส่งข้อความและบันทึก message_id ลง Database"""
+    disclaimer = "-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง"
+    full_footer = f"\n\n{disclaimer}\n"
+    
+    if not text:
+        if waiting_msg: 
+            try: await waiting_msg.delete()
+            except: pass
+        return
+
+    if waiting_msg:
+        try: await waiting_msg.delete()
+        except: pass
+
+    # เตรียมข้อความ
+    clean_text = text.replace(full_footer, "").replace(disclaimer, "").strip()
+    chunks = [clean_text[i:i+1900] for i in range(0, len(clean_text), 1900)]
+    
+    if chunks:
+        chunks[-1] = chunks[-1] + full_footer
+    else:
+        chunks = [full_footer.strip()]
+
+    # ส่งข้อความและบันทึก ID
+    sent_messages = []
+    for chunk in chunks:
+        if isinstance(target, discord.Interaction):
+            msg = await target.followup.send(chunk)
+        else:
+            msg = await target.send(chunk)
+        sent_messages.append(msg)
+
+    # บันทึก Mapping ลง Database
+    if reply_to_id and sent_messages:
+        conn = connect_db()
+        cursor = conn.cursor()
+        for m in sent_messages:
+            cursor.execute(
+                "INSERT OR REPLACE INTO MessageMappings (message_id, user_id) VALUES (?, ?)",
+                (m.id, reply_to_id)
+            )
+        conn.commit()
+        conn.close()
+
+
+async def build_query_with_history(channel, user_id=None, current_content=None, max_messages=25, same_day=False):
     messages = []
     now = discord.utils.utcnow()
-    last_ts = now
+    channel_prefix = "!health"
+    is_dm = isinstance(channel, discord.DMChannel)
     
-    # หัวข้อ Embed ที่เป็นเรื่องระบบและควรข้าม
+    # ดึง Message IDs ของบอทที่เคยตอบ User คนนี้
+    bot_msg_ids = set()
+    if user_id:
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT message_id FROM MessageMappings WHERE user_id = ?", (user_id,))
+        bot_msg_ids = {row[0] for row in cursor.fetchall()}
+        conn.close()
+
     ignored_titles = ["⚠️ ยืนยันการลบข้อมูล", "ยืนยันการลบข้อมูล", "Error", "🗑️ ลบข้อมูลเรียบร้อย"]
-    disclaimer = "\n\n-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง\n"
-    
-    cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0) if same_day else None
 
-    async for prev in channel.history(limit=100, before=now, after=cutoff, oldest_first=False):
-        # 1. กรอง Author ทั่วไป
-        if prev.author.bot and prev.author != bot.user:
-            continue
-        if user_id and not prev.author.bot and prev.author.id != user_id:
-            continue
-
-        # 2. ตรวจสอบ Embed และเงื่อนไขการลบข้อมูล
-        should_ignore = False
-        if prev.embeds:
-            for embed in prev.embeds:
-                # เช็ค Title ว่าเป็นเรื่องระบบหรือไม่
-                is_system_title = any(title in (embed.title or "") for title in ignored_titles)
-                
-                if is_system_title:
-                    # ถ้าเป็น Embed ของบอท ให้เช็คว่า "เกี่ยวกับ User คนนี้หรือไม่"
-                    # โดยตรวจสอบจาก Footer หรือ Author ใน Embed ที่เรามักระบุชื่อ user ไว้
-                    # หรือตรวจสอบว่านี่เป็น Interaction ของ user_id นี้
-                    should_ignore = True
-                    break
-        
-        if should_ignore:
-            continue
-
-        # 3. ดึงเนื้อหา (ข้ามหากเป็นข้อความว่างหลังจากกรอง)
-        full_content = prev.content if prev.content else ""
-        
-        if prev.author == bot.user and prev.embeds:
-            embed_texts = []
-            for embed in prev.embeds:
-                # กรองเนื้อหาใน Embed
-                if embed.title: embed_texts.append(f"Title: {embed.title}")
-                if embed.description: embed_texts.append(embed.description)
-                for field in embed.fields:
-                    embed_texts.append(f"{field.name}: {field.value}")
-            
-            full_content = f"{full_content}\n" + "\n".join(embed_texts).strip()
-
-        # ลบ Disclaimer
-        full_content = full_content.replace(disclaimer, "").strip()
-
-        if not full_content:
-            continue
-
-        # 4. Check Time Gap & Role Mapping
-        if not same_day:
-            gap = (last_ts - prev.created_at).total_seconds()
-            if gap > time_threshold_seconds and len(messages) > 0:
+    async for prev in channel.history(limit=100, before=now):
+        if same_day:
+            # ตรวจสอบว่าข้อความเกิดในวันเดียวกันหรือไม่ (UTC)
+            if prev.created_at.date() != now.date():
+                # ถ้าเก่ากว่าวันนี้ ให้หยุดการดึงประวัติทันที (เพราะ history เรียงจากใหม่ไปเก่า)
                 break
 
+        # --- กรองข้อความจาก USER ---
+        if not prev.author.bot:
+            # 1. ต้องเป็น User คนเดียวกับที่ถาม
+            if user_id and prev.author.id != user_id:
+                continue
+            
+            # 2. ถ้าไม่ใช่ DM ต้องมี Prefix "!health" เท่านั้นถึงจะเก็บเข้า History
+            if not is_dm and not prev.content.startswith(channel_prefix):
+                continue
+
+        # --- กรองข้อความจาก BOT ---
+        else:
+            if prev.author == bot.user:
+                # ข้ามข้อความระบบ
+                if prev.embeds and any(e.title in ignored_titles for e in prev.embeds):
+                    continue
+                
+                # เช็ค Mapping ว่าบอทตอบ User คนนี้หรือไม่
+                if user_id and prev.id not in bot_msg_ids:
+                    continue
+
+        # --- จัดการเนื้อหาข้อความ ---
+        # ลบ Prefix ออกจาก History เพื่อให้ LLM เห็นเฉพาะเนื้อหาคำถามจริงๆ
+        raw_content = prev.content if prev.content else ""
+        clean_content = raw_content.replace(channel_prefix, "", 1).strip() if not is_dm else raw_content.strip()
+        
+        # ดึง Text จาก Embed (ถ้ามี)
+        if prev.author == bot.user and prev.embeds:
+            embed_texts = [f"{e.title}\n{e.description}" for e in prev.embeds if e.title not in ignored_titles]
+            clean_content += "\n" + "\n".join(embed_texts)
+
+        # ลบ Disclaimer
+        disclaimer = "-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง"
+        clean_content = clean_content.replace(disclaimer, "").strip()
+
+        if not clean_content:
+            continue
+
         role = "assistant" if prev.author == bot.user else "user"
-        messages.append({"role": role, "content": full_content})
-        last_ts = prev.created_at
+        messages.append({"role": role, "content": clean_content})
 
         if len(messages) >= max_messages:
             break
 
     messages.reverse()
-    
+
     if current_content:
-        messages.append({"role": "user", "content": current_content.replace(disclaimer, "").strip()})
-        
+        messages.append({"role": "user", "content": current_content.strip()})
+
     return messages
 
 
-async def send_response_safely(target, text: str, waiting_msg: discord.Message = None):
-    """
-    ส่งข้อความแบบแบ่ง Chunk และลบข้อความรอ พร้อมควบคุม Disclaimer ไม่ให้ซ้ำซ้อน
-    """
-    disclaimer = "-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง"
-    full_disclaimer = f"\n\n{disclaimer}\n"
-
-    if not text:
-        if waiting_msg:
-            await waiting_msg.delete()
-        return
-
-    if waiting_msg:
-        try:
-            await waiting_msg.delete()
-        except:
-            pass
-
-    clean_text = text.replace(full_disclaimer, "").replace(disclaimer, "").strip()
-    chunks = [clean_text[i:i+1900] for i in range(0, len(clean_text), 1900)]
-
-    if chunks:
-        chunks[-1] = chunks[-1] + full_disclaimer
-    else:
-        # กรณี clean_text ว่างเปล่า (เช่น มีแต่ disclaimer อย่างเดียว)
-        chunks = [full_disclaimer.strip()]
-
-    # 4. เริ่มส่งข้อความ
-    for chunk in chunks:
-        try:
-            if isinstance(target, discord.Interaction):
-                if target.response.is_done():
-                    await target.followup.send(chunk)
-                else:
-                    await target.response.send_message(chunk)
-            else:
-                await target.send(chunk)
-        except Exception as e:
-            print(f"Error sending chunk: {e}")
+def cleanup_message_mappings(days_to_keep=7):
+    """ลบประวัติ Mapping ที่เก่าเกินกำหนดเพื่อประหยัดพื้นที่"""
+    conn = connect_db()
+    cursor = conn.cursor()
+    try:
+        # ลบข้อมูลที่ timestamp เก่ากว่า X วัน
+        cursor.execute(
+            "DELETE FROM MessageMappings WHERE timestamp < datetime('now', ?)",
+            (f'-{days_to_keep} days',)
+        )
+        deleted_count = cursor.rowcount
+        conn.commit()
+        if deleted_count > 0:
+            print(f"🧹 Cleanup: ลบ Mapping เก่าออก {deleted_count} รายการเรียบร้อย")
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+    finally:
+        conn.close()
 
 
 @bot.event
@@ -280,11 +299,11 @@ async def on_message(message):
             return
 
         waiting_msg = await message.channel.send("⏳ *กำลังประมวลผลข้อมูลของคุณ กรุณารอสักครู่...*")
-        history = await build_query_with_history(message.channel, user_id=message.author.id, current_content=content)
+        history = await build_query_with_history(message.channel, user_id=message.author.id)
         response_text, state = generate_response(history, user_id=message.author.id)
 
         if response_text:
-            await send_response_safely(message.channel, response_text, waiting_msg)
+            await send_response_safely(message.channel, response_text, waiting_msg=waiting_msg, reply_to_id=message.author.id)
 
         if state.get("pending_extraction"):
             pending = state["pending_extraction"]
@@ -326,7 +345,7 @@ async def on_message(message):
         await message.channel.send(embed=error_embed)
 
 
-@bot.tree.command(name="summary", description="Get your personalized health summary.")
+@bot.tree.command(name="summary", description="สร้างสรุปประจำวัน")
 async def summary(interaction):
     """
     Docstring for summary
@@ -398,8 +417,8 @@ async def summary(interaction):
         await interaction.channel.send(embed=error_embed)
 
 
-@bot.tree.command(name="update-user", description="Update your personal profile with your words.")
-@app_commands.describe(info="Your info...")
+@bot.tree.command(name="update-user", description="เขียนอัพเดต และบันทึกข้อมูลของคุณ (ไม่ตอบคำถาม)")
+@app_commands.describe(info="ข้อความอธิบายอธิบาย มีอะไรใหม่อยากให้บอทบันทึกบ้าง")
 async def update_user(interaction, info: str):
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=info)
@@ -419,8 +438,8 @@ async def update_user(interaction, info: str):
         await interaction.followup.send(embed=embed, view=view)
 
 
-@bot.tree.command(name="ask", description="Ask the bot a question. (Alternative to `!health` prefix in server channels)")
-@app_commands.describe(question="The question you want to ask...")
+@bot.tree.command(name="ask", description="ถามคำถามบอท")
+@app_commands.describe(question="คำถามที่อยากถาม")
 async def ask(interaction, question: str):
     """
     Docstring for ask
@@ -429,14 +448,13 @@ async def ask(interaction, question: str):
     :param question: Description
     :type question: str
     """
-    await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
     response_text, _ = generate_response(history, user_id=interaction.user.id, topic='ask')
-    await send_response_safely(interaction.channel, response_text)
+    await send_response_safely(interaction.channel, response_text, reply_to_id=interaction.user.id)
 
 
-@bot.tree.command(name="askraw", description="[For Testing Only] Ask the bot a question without RAG.")
-@app_commands.describe(question="The question you want to ask...")
+@bot.tree.command(name="askraw", description="[For Testing Only] ถามคำถามบอท (ไม่ใช้ RAG)")
+@app_commands.describe(question="คำถามที่อยากถาม")
 async def askraw(interaction, question: str):
     """
     Docstring for askraw
@@ -445,19 +463,18 @@ async def askraw(interaction, question: str):
     :param question: Description
     :type question: str
     """
-    await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
     response_text, _ = generate_response(history, user_id=None, use_info=False, use_rag=False, topic='ask')
-    await send_response_safely(interaction.channel, response_text)
+    await send_response_safely(interaction.channel, response_text, reply_to_id=interaction.user.id)
 
 
-@bot.tree.command(name="log", description="Manually log your daily health stats.")
+@bot.tree.command(name="log", description="จดบันทึกข้อมูลสุขภาพจากอุปกรณ์ของคุณ")
 @app_commands.describe(
     steps="The steps taken (step)",
     sleep_hours="Your sleep hours from last night (hr)",
     calories_burned="Calories burned (kcal)",
-    avg_heart_rate="Your recorded average heart rate",
-    active_minutes="Your detected active minutes (min)", 
+    avg_heart_rate="Your recorded average heart rate (bpm)",
+    active_minutes="Your detected active minutes (min)",
 
     weight="Your recorded weight (kg)",
     height="Your recorded height (cm)"
@@ -511,10 +528,19 @@ async def reset_user(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view)
 
 
+# เพิ่มเข้าไปใน class บอทของคุณ หรือในไฟล์หลัก
+@tasks.loop(hours=24)
+async def daily_cleanup():
+    cleanup_message_mappings(days_to_keep=7)
+    print("Daily cleanup task completed.")
+
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f'We have logged in as {bot.user}')
+    if not daily_cleanup.is_running():
+        daily_cleanup.start()
 
 
 def main():
