@@ -432,7 +432,7 @@ async def ask(interaction, question: str):
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
     response_text, _ = generate_response(history, user_id=interaction.user.id, topic='ask')
-    await send_long_message(interaction.channel, response_text)
+    await send_response_safely(interaction.channel, response_text)
 
 
 @bot.tree.command(name="askraw", description="[For Testing Only] Ask the bot a question without RAG.")
@@ -448,7 +448,7 @@ async def askraw(interaction, question: str):
     await interaction.response.defer(thinking=True)
     history = await build_query_with_history(interaction.channel, user_id=interaction.user.id, current_content=question)
     response_text, _ = generate_response(history, user_id=None, use_info=False, use_rag=False, topic='ask')
-    await send_long_message(interaction.channel, response_text)
+    await send_response_safely(interaction.channel, response_text)
 
 
 @bot.tree.command(name="log", description="Manually log your daily health stats.")
