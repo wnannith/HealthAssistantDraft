@@ -594,7 +594,7 @@ def rate_severity(state: AgentState):
     rating_llm = rate_prompt | structured_llm
 
     try:
-        formatted_msgs = format_messages(state["messages"])
+        formatted_msgs = state["question"]
         response = rating_llm.invoke({"input": formatted_msgs})
         state["severity_rate"] = response.rate
         state = create_invoke_qa(state, "rate_severity", system_prompt, response)

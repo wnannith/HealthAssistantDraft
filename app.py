@@ -73,22 +73,41 @@ class ResetConfirmView(discord.ui.View):
             return await interaction.response.send_message("คุณไม่มีสิทธิ์กดยืนยันแทนคนอื่น", ephemeral=True)
 
         try:
-            # Perform the database deletion
             conn = connect_db()
             conn.execute("PRAGMA foreign_keys = ON")
             cursor = conn.cursor()
 
-            # Delete from both tables (Foreign key handles records if configured, but manual is safer)
+            # 1. ลบข้อมูลจากตารางลูกที่เกี่ยวข้องทั้งหมด
             cursor.execute("DELETE FROM MessageMappings WHERE user_id = ?", (self.user_id,))
             cursor.execute("DELETE FROM UserSummaryRecords WHERE user_id = ?", (self.user_id,))
             cursor.execute("DELETE FROM UserActivityRecords WHERE user_id = ?", (self.user_id,))
             cursor.execute("DELETE FROM UserBMIRecords WHERE user_id = ?", (self.user_id,))
-            cursor.execute("DELETE FROM Users WHERE user_id = ?", (self.user_id,))
+            
+            # 2. เก็บเวลาปัจจุบัน (UTC) ไว้สำหรับกั้นประวัติใน Discord
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # 3. แทนที่จะ DELETE จาก Users ให้ทำการ UPDATE ล้างค่าเก่าและบันทึกเวลา Reset
+            cursor.execute("""
+                UPDATE Users 
+                SET name = NULL, 
+                    dob = NULL, 
+                    gender = NULL, 
+                    occupation = NULL, 
+                    description = NULL, 
+                    chronic_disease = NULL,
+                    last_reset_at = ?
+                WHERE user_id = ?
+            """, (now_iso, self.user_id))
+
+            # กรณีถ้าไม่เคยมี User นี้ในตาราง (อาจจะล้างตอนยังไม่มีโปรไฟล์) ให้ Insert เข้าไปใหม่
+            if cursor.rowcount == 0:
+                cursor.execute("INSERT INTO Users (user_id, last_reset_at) VALUES (?, ?)", 
+                               (self.user_id, now_iso))
             
             conn.commit()
             conn.close()
 
-            await interaction.response.edit_message(content="🗑️ ข้อมูลของคุณถูกลบออกจากระบบโดยถาวรแล้ว", view=None)
+            await interaction.response.edit_message(content="🗑️ ระบบได้ล้างข้อมูลและประวัติการสนทนาของคุณเรียบร้อยแล้ว (ข้อความก่อนหน้านี้จะถูกเพิกเฉย)", view=None)
         except Exception as e:
             await interaction.response.send_message(f"เกิดข้อผิดพลาด: {e}")
 
@@ -184,55 +203,66 @@ async def build_query_with_history(channel, user_id=None, current_content=None, 
     now = discord.utils.utcnow()
     channel_prefix = "!health"
     is_dm = isinstance(channel, discord.DMChannel)
+    ignored_titles = ["⚠️ ยืนยันการลบข้อมูล", "ยืนยันการลบข้อมูล", "Error", "🗑️ ลบข้อมูลเรียบร้อย"]
     
-    # ดึง Message IDs ของบอทที่เคยตอบ User คนนี้
+    last_reset = None
     bot_msg_ids = set()
     if user_id:
         conn = connect_db()
         cursor = conn.cursor()
         cursor.execute("SELECT message_id FROM MessageMappings WHERE user_id = ?", (user_id,))
         bot_msg_ids = {row[0] for row in cursor.fetchall()}
+        
+        row = conn.execute("SELECT last_reset_at FROM Users WHERE user_id = ?", (user_id,)).fetchone()
+        if row and row[0]:
+            last_reset = datetime.fromisoformat(row[0])
+
         conn.close()
 
-    ignored_titles = ["⚠️ ยืนยันการลบข้อมูล", "ยืนยันการลบข้อมูล", "Error", "🗑️ ลบข้อมูลเรียบร้อย"]
-
     async for prev in channel.history(limit=100, before=now):
-        if same_day:
-            # ตรวจสอบว่าข้อความเกิดในวันเดียวกันหรือไม่ (UTC)
-            if prev.created_at.date() != now.date():
-                # ถ้าเก่ากว่าวันนี้ ให้หยุดการดึงประวัติทันที (เพราะ history เรียงจากใหม่ไปเก่า)
-                break
+        # --- กรองข้อความที่เกิดก่อนการ Reset ---
+        if last_reset and prev.created_at <= last_reset:
+            # เนื่องจาก history เรียงจากใหม่ไปเก่า 
+            # ถ้าเจอข้อความที่เก่ากว่าเวลา reset แล้ว ข้อความหลังจากนี้ก็เก่าหมดแน่นอน
+            break
 
-        # --- กรองข้อความจาก USER ---
-        if not prev.author.bot:
-            # 1. ต้องเป็น User คนเดียวกับที่ถาม
+        # 1. เช็ควัน (Same Day)
+        if same_day and prev.created_at.date() != now.date():
+            break
+
+        # 2. แยกจัดการระหว่าง "ข้อความจากคน" กับ "ข้อความจากบอท"
+        if prev.author.bot:
+            # --- กรณีเป็น BOT ---
+            # ต้องเป็นบอทตัวนี้เท่านั้น และต้องมี ID อยู่ใน Mapping ของ user_id นี้
+            if prev.author.id != bot.user.id or prev.id not in bot_msg_ids:
+                continue
+            role = "assistant"
+        else:
+            # --- กรณีเป็น USER ---
+            # ต้องเป็นเจ้าของ user_id ที่เรียกมาเท่านั้น
             if user_id and prev.author.id != user_id:
                 continue
             
-            # 2. ถ้าไม่ใช่ DM ต้องมี Prefix "!health" เท่านั้นถึงจะเก็บเข้า History
+            # ถ้าอยู่ใน Server (ไม่ใช่ DM) ต้องมี Prefix !health
             if not is_dm and not prev.content.startswith(channel_prefix):
                 continue
+            role = "user"
 
-        # --- กรองข้อความจาก BOT ---
-        else:
-            if prev.author == bot.user:
-                # ข้ามข้อความระบบ
-                if prev.embeds and any(e.title in ignored_titles for e in prev.embeds):
-                    continue
-                
-                # เช็ค Mapping ว่าบอทตอบ User คนนี้หรือไม่
-                if user_id and prev.id not in bot_msg_ids:
-                    continue
-
-        # --- จัดการเนื้อหาข้อความ ---
-        # ลบ Prefix ออกจาก History เพื่อให้ LLM เห็นเฉพาะเนื้อหาคำถามจริงๆ
+        # 3. จัดการเนื้อหาข้อความ (Clean content)
         raw_content = prev.content if prev.content else ""
-        clean_content = raw_content.replace(channel_prefix, "", 1).strip() if not is_dm else raw_content.strip()
         
-        # ดึง Text จาก Embed (ถ้ามี)
-        if prev.author == bot.user and prev.embeds:
-            embed_texts = [f"{e.title}\n{e.description}" for e in prev.embeds if e.title not in ignored_titles]
-            clean_content += "\n" + "\n".join(embed_texts)
+        # ลบ Prefix
+        if not is_dm and raw_content.startswith(channel_prefix):
+            clean_content = raw_content.replace(channel_prefix, "", 1).strip()
+        else:
+            clean_content = raw_content.strip()
+        
+        # ดึง Text จาก Embed (เฉพาะของบอท)
+        if prev.author.id == bot.user.id and prev.embeds:
+            embed_texts = [f"{e.title}\n{e.description}" for e in prev.embeds 
+                           if e.title not in ignored_titles]
+            if embed_texts:
+                clean_content += "\n" + "\n".join(embed_texts)
 
         # ลบ Disclaimer
         disclaimer = "-# ไม่ใช่คำวินิจฉัยทางการแพทย์ กรุณาปรึกษากับแพทย์ผู้ชำนาญการก่อนทุกครั้ง"
@@ -241,7 +271,6 @@ async def build_query_with_history(channel, user_id=None, current_content=None, 
         if not clean_content:
             continue
 
-        role = "assistant" if prev.author == bot.user else "user"
         messages.append({"role": role, "content": clean_content})
 
         if len(messages) >= max_messages:

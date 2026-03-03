@@ -6,6 +6,7 @@ CREATE TABLE "Users" (
 	"occupation" TEXT,
 	"description" TEXT,
 	"chronic_disease" TEXT,
+	"last_reset_at" DATETIME
 	PRIMARY KEY("user_id")
 );
 
