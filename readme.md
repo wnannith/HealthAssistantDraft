@@ -25,6 +25,7 @@
 
 ### การใช้งานเบื้องต้น
 
+
 ![example](imgs/ver2/example1.png)  
 *ส่งข้อความครั้งแรก (ใช้ใน channel รวม ต้องมี `!health` นำหน้า)*  
 
@@ -32,10 +33,13 @@
 *ระหว่างรอคำตอบ*  
 
 ![example](imgs/ver2/example3.png)  
-*ได้คำตอบแล้ว และเมื่อตรวจพบข้อมูลผู้ใช้ที่อัพเดตได้ จะสร้างหน้าต่างเพื่อยืนยัน ถ้า Confirm & Save ข้อมูลจะอยู่ใน database เพื่อเอาไปใช้งานต่อไป*  
+*ได้คำตอบแล้ว และเมื่อตรวจพบข้อมูลผู้ใช้ที่อัพเดตได้ จะสร้างหน้าต่างเพื่อยืนยัน ถ้า Confirm & Save ข้อมูลจะอยู่ใน database เพื่อเอาไปใช้งานต่อไป (รายละเอียดข้อมูลที่เก็บ ด้านล่าง)*  
 
 ![example](imgs/ver2/example4.png)  
 *สรุปรายวัน จาก `/summary`*  
+
+![example](imgs/ver3/example4.png)
+*(เสริม) การเข้า Direct Message ผ่านหน้าโปรไฟล์*
 
 
 ### การใช้งานใน channel รวม กรณีมีการใช้งานพร้อมกันหลายคน
@@ -61,10 +65,11 @@
 
 - `/summary`: สร้าง embed สรุปประจำวัน
 - `/log`: กรอกข้อมูลสุขภาพประจำวัน (จำนวนก้าวเดิน, active minutes, etc.)
-- `/update-user`: ใช้ update ข้อมูลผู้ใช้อย่างเดียว ไม่ส่งข้อความตอบกลับ  
+- `/reset-user`: ลบข้อมูลจาก database  
+    *ส่วนต่อไปนี้ยังไม่เสถียร (prefix `!health` มี functionality ที่ใช้ทดแทนคำสั่งเหล่านี้ได้อยู่)*
 - `/ask`: ตอบกลับผู้ใช้ ไม่สกัดข้อมูล
 - `/askraw`: ตอบกลับผู้ใช้ ไม่สกัดข้อมูล และบังคับไม่ดึง RAG กับข้อมูลส่วนบุคคล 
-- `/reset-user`: ลบข้อมูลจาก database
+- `/update-user`: ใช้ update ข้อมูลผู้ใช้อย่างเดียว ไม่ส่งข้อความตอบกลับ  
 
 
 ### **Langchain / Langgraph** 
@@ -75,6 +80,7 @@
 
 
 ### **RAG**   
+
 
 จาก file ใน folder `source/` นำไป process ผ่าน `tools_chunking/office_chunking.py` ได้ vector database (Chroma) ใน folder `db/`  
 
@@ -97,28 +103,40 @@
 
 
 
+## ข้อจำกัด
+
+- Context ไม่ข้าม channel
+- บังคับลืมใน 7 วัน
+- ปัญหา token
+
+
+
+
 ## สำหรับ host
+
 
 > Run `app.py`
 
 - **แก้ชื่อ `env.txt` เป็น `.env` และใส่ token ก่อน**  
     มีแค่ `DISCORD_TOKEN` `OPENTYPHOON_API_KEY` กับ `GOOGLE_API_KEY` ที่ต้องใส่จริง ๆ ที่เหลือเว้นไว้ได้
-- **ดูชื่อ model ใน `chat.py` ด้วย**  
-    ~~ตั้ง global variable เป็น `ALTER = False` ถ้าจะใช้ Gemini เพราะถ้าตั้ง `ALTER = True` จะเรียกใช้ chat ของ Typhoon กับ embedding ของ OpenAI แทน~~  
-      
-    ตั้ง `ALTER = True`
+- ตั้ง `ALTER = True`
 
 
 
 
-## **อื่น ๆ**  
+## อื่น ๆ  
+
 
 - มี `requirements.txt`
 - มี file ใน `test_tools` เพื่อเรียก API ตรง ๆ ไม่ผ่าน Discord  
 - ย้าย system prompt ไว้ใน `default_context.json` ทั้งหมดแล้ว
 - ยังมี `db/nih-chroma/` อยู่  
 
+
+
+
 ## แหล่งอ้างอิง
+
 
 บทความที่เกี่ยวข้อง
 - [เจ็บป่วยจากการทำงานหน้าคอมฯ ภัยใกล้ตัวของคนทำงานออฟฟิศ-ทำงานที่บ้าน - OKMD Knowledge Portal](https://knowledgeportal.okmd.or.th/article/6478624920611)  
